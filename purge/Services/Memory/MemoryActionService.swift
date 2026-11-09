@@ -57,6 +57,12 @@ final class MemoryResultRace<Value: Sendable> {
     var continuation: CheckedContinuation<Value?, Never>?
     var timeout: Task<Void, Never>?
     init(_ continuation: CheckedContinuation<Value?, Never>) { self.continuation = continuation }
+
+    // Keep destruction explicit here. Swift 6.3.3 crashes in Release's
+    // EarlyPerfInliner while optimizing the synthesized deinit for this
+    // generic, actor-isolated holder.
+    deinit {}
+
     func finish(_ sample: Value?) {
         guard let continuation else { return }
         self.continuation = nil
