@@ -1,0 +1,864 @@
+import Foundation
+import Testing
+@testable import Purge
+
+private enum TestPaths {
+    static var home: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+    }
+
+    static func homeURL(_ components: String...) -> URL {
+        homeURL(components)
+    }
+
+    static func homeURL(_ components: [String]) -> URL {
+        components.reduce(home) { $0.appendingPathComponent($1) }
+    }
+
+    static func absoluteURL(_ path: String) -> URL {
+        URL(fileURLWithPath: path)
+    }
+
+    /// An empty temporary folder that stands in for the home folder, so a test can
+    /// lay out what discovery reads without reading the user's own Library (#171).
+    static func makeFakeHome() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("purge-test-home-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    /// The same place as `url`, inside `fakeHome`, but in the real home. The cache
+    /// allowlist knows only the real home, so the guard is asked about this path.
+    static func inRealHome(_ url: URL, from fakeHome: URL) throws -> URL {
+        let root = fakeHome.standardizedFileURL.path + "/"
+        let path = url.standardizedFileURL.path
+        try #require(path.hasPrefix(root))
+        return home.appendingPathComponent(String(path.dropFirst(root.count)))
+    }
+}
+
+// MARK: - Group 1: Never-delete paths
+
+@Suite("Never-delete paths always return .blockedNeverDelete")
+struct NeverDeletePathsTests {
+    @Test(arguments: [
+        (["Library", "Keychains"], "Keychains root"),
+        (["Library", "Keychains", "login.keychain-db"], "Keychains file"),
+        (["Library", "Preferences"], "Preferences root"),
+        (["Library", "Preferences", "com.apple.finder.plist"], "Preferences file"),
+        (["Library", "Application Support"], "Application Support root"),
+        (["Library", "Mail"], "Mail"),
+        (["Documents"], "Documents"),
+        (["Desktop"], "Desktop"),
+        (["Downloads"], "Downloads"),
+        (["Pictures"], "Pictures"),
+        (["Music"], "Music"),
+        (["Movies"], "Movies"),
+        (["System"], "System"),
+    ])
+    func homeNeverDeletePaths(components: [String], label: String) {
+        let url = TestPaths.homeURL(components)
+        #expect(
+            DeletionSafetyPolicy.evaluate(url) == .blockedNeverDelete,
+            "\(label): \(url.path)"
+        )
+    }
+
+    @Test(arguments: [
+        ("/usr/bin", "usr bin"),
+        ("/bin/bash", "bin bash"),
+        ("/etc/hosts", "etc hosts"),
+        ("/var/db", "var db"),
+        ("/Library", "Library root"),
+        ("/sbin", "sbin"),
+    ])
+    func systemNeverDeletePaths(path: String, label: String) {
+        let url = TestPaths.absoluteURL(path)
+        #expect(
+            DeletionSafetyPolicy.evaluate(url) == .blockedNeverDelete,
+            "\(label): \(path)"
+        )
+    }
+
+    @Test
+    func neverDeletePrefixEntries() {
+        let home = TestPaths.home.standardizedFileURL.path
+        for prefix in DeletionSafetyPolicy.neverDeletePrefixes(home: home) {
+            let url = URL(fileURLWithPath: prefix)
+            #expect(
+                DeletionSafetyPolicy.evaluate(url) == .blockedNeverDelete,
+                "prefix root: \(prefix)"
+            )
+            let child = URL(fileURLWithPath: prefix + "/nested-item")
+            #expect(
+                DeletionSafetyPolicy.evaluate(child) == .blockedNeverDelete,
+                "prefix child: \(child.path)"
+            )
+        }
+    }
+
+    @Test
+    func neverDeleteExactPathEntries() {
+        let home = TestPaths.home.standardizedFileURL.path
+        for exact in DeletionSafetyPolicy.neverDeleteExactPaths(home: home) {
+            let url = URL(fileURLWithPath: exact)
+            #expect(
+                DeletionSafetyPolicy.evaluate(url) == .blockedNeverDelete,
+                "exact path: \(exact)"
+            )
+        }
+    }
+}
+
+// MARK: - Group 2: Protected system caches
+
+@Suite("Protected system caches return .blockedNeverDelete")
+struct ProtectedSystemCachesTests {
+    @Test
+    func cloudKitCache() {
+        let url = TestPaths.homeURL("Library", "Caches", "CloudKit")
+        #expect(DeletionSafetyPolicy.evaluate(url) == .blockedNeverDelete)
+    }
+
+    @Test
+    func familyCircleCache() {
+        let url = TestPaths.homeURL("Library", "Caches", "FamilyCircle")
+        #expect(DeletionSafetyPolicy.evaluate(url) == .blockedNeverDelete)
+    }
+
+    @Test
+    func safariContainerCache() {
+        let url = TestPaths.homeURL(
+            "Library", "Containers", "com.apple.Safari", "Data", "Library", "Caches"
+        )
+        #expect(DeletionSafetyPolicy.evaluate(url) == .blockedNeverDelete)
+    }
+
+    @Test(arguments: [
+        "com.apple.Home",
+        "com.apple.homed",
+        "com.apple.HomeKit",
+    ])
+    func homeKitContainerCaches(bundleID: String) {
+        let url = TestPaths.homeURL(
+            "Library", "Containers", bundleID, "Data", "Library", "Caches"
+        )
+        #expect(DeletionSafetyPolicy.evaluate(url) == .blockedNeverDelete)
+        #expect(!DeletionSafetyPolicy.isOfferedForCleanup(url))
+    }
+
+    @Test(arguments: [
+        "com.apple.accountsd",
+        "com.apple.appleaccountd",
+        "com.apple.amsaccountsd",
+        "com.apple.akd",
+        "com.apple.AuthenticationServicesCore.AuthenticationServicesAgent",
+        "com.apple.identityservicesd",
+        "com.apple.iCloudHelper",
+        "com.apple.icloudwebd",
+    ])
+    func keychainSensitiveDaemonCaches(folderName: String) {
+        // Wiping these makes the identity daemons re-authorize against the login
+        // keychain, causing repeated keychain password prompts after a clean.
+        let url = TestPaths.homeURL("Library", "Caches", folderName)
+        #expect(DeletionSafetyPolicy.evaluate(url) == .blockedNeverDelete)
+        #expect(!DeletionSafetyPolicy.isOfferedForCleanup(url))
+
+        let child = TestPaths.homeURL("Library", "Caches", folderName, "nested")
+        #expect(DeletionSafetyPolicy.evaluate(child) == .blockedNeverDelete)
+    }
+
+    @Test(arguments: [
+        "com.apple.Passwords",
+        "com.apple.Passwords-Settings.extension",
+        "com.apple.AuthKit.AKDiagnosticExtension",
+        "com.apple.AuthKitUI.AKAppSSOExtension",
+        "com.apple.AppleAccountUI.AAUIFollowUpExtension",
+        "com.apple.AccountsUISettings.AppIntents",
+        "com.apple.PassKit.PaymentAuthorizationUIExtension",
+        "com.apple.Internet-Accounts-Settings.extension",
+    ])
+    func identityStackContainerCaches(bundleID: String) {
+        let url = TestPaths.homeURL(
+            "Library", "Containers", bundleID, "Data", "Library", "Caches"
+        )
+        #expect(DeletionSafetyPolicy.evaluate(url) == .blockedNeverDelete)
+        #expect(!DeletionSafetyPolicy.isOfferedForCleanup(url))
+    }
+
+    @Test
+    func unrelatedContainerCachesRemainOffered() {
+        // The prefix guard must not swallow ordinary third-party containers.
+        let url = TestPaths.homeURL(
+            "Library", "Containers", "com.example.SomeApp", "Data", "Library", "Caches"
+        )
+        #expect(DeletionSafetyPolicy.evaluate(url) == .allow)
+    }
+
+    @Test
+    func diagnosticReportsForNewHardwareIsNeverOffered() {
+        // macOS surfaces this sibling of DiagnosticReports inside the Application Logs
+        // scan but refuses to delete it, so it must never be offered.
+        let folder = TestPaths.homeURL("Library", "Logs", "DiagnosticReportsForNewHardware")
+        #expect(DeletionSafetyPolicy.evaluate(folder) == .blockedNeverDelete)
+        #expect(!DeletionSafetyPolicy.isOfferedForCleanup(folder))
+
+        let child = TestPaths.homeURL(
+            "Library", "Logs", "DiagnosticReportsForNewHardware", "report.diag"
+        )
+        #expect(DeletionSafetyPolicy.evaluate(child) == .blockedNeverDelete)
+    }
+
+    @Test
+    func diagnosticReportsCrashLogsStillOffered() {
+        // The adjacent DiagnosticReports folder remains cleanable as Crash Reports.
+        let url = TestPaths.homeURL("Library", "Logs", "DiagnosticReports")
+        #expect(DeletionSafetyPolicy.evaluate(url) == .allow)
+    }
+}
+
+// MARK: - Group 2b: Apple identity caches that caused real keychain prompts
+
+@Suite("Apple ID / iCloud / payment caches are never offered")
+struct IdentityCacheProtectionTests {
+    /// Folders Purge was observed deleting on a real machine, each of which
+    /// forces a daemon to re-authorize against the Apple ID and re-prompt for
+    /// the login keychain password. Regression guard: these must stay blocked.
+    @Test(arguments: [
+        "com.apple.itunescloudd",
+        "com.apple.iCloudNotificationAgent",
+        "PassKit",
+    ])
+    func observedOffendersAreBlocked(folderName: String) {
+        let url = TestPaths.homeURL("Library", "Caches", folderName)
+        #expect(DeletionSafetyPolicy.evaluate(url) == .blockedNeverDelete)
+        #expect(!DeletionSafetyPolicy.isOfferedForCleanup(url))
+
+        let child = TestPaths.homeURL("Library", "Caches", folderName, "nested", "blob")
+        #expect(DeletionSafetyPolicy.evaluate(child) == .blockedNeverDelete)
+    }
+
+    /// The fragment rule exists so a daemon we have never seen is refused by
+    /// default rather than after the next prompt storm.
+    @Test(arguments: [
+        "com.apple.accountsd2",
+        "com.apple.AccountPolicyHelper",
+        "com.apple.iCloudDriveFileProvider",
+        "com.apple.itunescloudkitd",
+        "com.apple.AppleIDSettings",
+        "com.apple.AuthKitUI",
+        "com.apple.AuthenticationServicesAgent",
+        "com.apple.AuthorizationHost",
+        "com.apple.identityservicesd.helper",
+        "com.apple.KeychainCircle",
+        "com.apple.PassKitCore",
+        "SomeVendorAccountSync",
+    ])
+    func unlistedIdentityCachesAreBlockedByFragment(folderName: String) {
+        let url = TestPaths.homeURL("Library", "Caches", folderName)
+        #expect(
+            DeletionSafetyPolicy.evaluate(url) == .blockedNeverDelete,
+            "should be blocked by fragment: \(folderName)"
+        )
+        #expect(!DeletionSafetyPolicy.isOfferedForCleanup(url))
+    }
+
+    /// Every declared exact name must actually be refused — catches an entry
+    /// added to the set but shadowed by a later allowlist rule.
+    @Test
+    func everyDeclaredProtectedNameIsBlocked() {
+        for name in DeletionSafetyPolicy.protectedSystemCacheFolderNames {
+            let url = TestPaths.homeURL("Library", "Caches", name)
+            #expect(
+                DeletionSafetyPolicy.evaluate(url) == .blockedNeverDelete,
+                "declared protected name not blocked: \(name)"
+            )
+        }
+    }
+
+    /// Every declared fragment must actually be wired into the guard.
+    @Test
+    func everyDeclaredFragmentIsWired() {
+        for fragment in DeletionSafetyPolicy.protectedSystemCacheFolderFragments {
+            let name = "com.example.\(fragment)service"
+            #expect(
+                DeletionSafetyPolicy.isProtectedSystemCacheFolderName(name),
+                "fragment not wired: \(fragment)"
+            )
+            let url = TestPaths.homeURL("Library", "Caches", name)
+            #expect(DeletionSafetyPolicy.evaluate(url) == .blockedNeverDelete)
+        }
+    }
+
+    /// The fragments must stay narrow enough that ordinary caches — the bulk of
+    /// what Purge is for — keep flowing through.
+    @Test(arguments: [
+        "com.apple.Safari",
+        "ru.keepcoder.Telegram",
+        "com.spotify.client",
+        "com.tinyspeck.slackmacgap",
+        "Homebrew",
+        "Yarn",
+        "ms-playwright",
+        "com.google.Chrome",
+        // "Author" contains "auth" — proof the fragments avoid a bare "auth".
+        "com.apple.iBooksAuthor",
+        "com.adobe.AuthoringTools",
+    ])
+    func ordinaryCachesRemainOffered(folderName: String) {
+        let url = TestPaths.homeURL("Library", "Caches", folderName)
+        #expect(
+            DeletionSafetyPolicy.evaluate(url) == .allow,
+            "over-blocked an ordinary cache: \(folderName)"
+        )
+    }
+
+    /// The guard is scoped to `~/Library/Caches` top-level folders; a matching
+    /// name deeper inside an unrelated allowlisted cache must not be affected.
+    @Test
+    func fragmentDoesNotBlockNestedNamesElsewhere() {
+        let nested = TestPaths.homeURL(
+            "Library", "Caches", "com.google.Chrome", "accounts", "index"
+        )
+        #expect(DeletionSafetyPolicy.evaluate(nested) == .allow)
+
+        let derivedData = TestPaths.homeURL(
+            "Library", "Developer", "Xcode", "DerivedData", "MyAccountApp-abc", "Build"
+        )
+        #expect(DeletionSafetyPolicy.evaluate(derivedData) == .allow)
+    }
+}
+
+// MARK: - Group 3: Whitelisted absolute prefixes
+
+@Suite("Whitelisted paths return .allow")
+struct WhitelistedAbsolutePrefixesTests {
+    @Test
+    func safariFlatCache() {
+        let url = TestPaths.homeURL("Library", "Caches", "com.apple.Safari")
+        #expect(DeletionSafetyPolicy.evaluate(url) == .allow)
+    }
+
+    @Test
+    func xcodeDerivedData() {
+        let url = TestPaths.homeURL("Library", "Developer", "Xcode", "DerivedData")
+        #expect(DeletionSafetyPolicy.evaluate(url) == .allow)
+    }
+
+    @Test
+    func xcodeDerivedDataBuildSubfolder() {
+        let url = TestPaths.homeURL(
+            "Library", "Developer", "Xcode", "DerivedData", "MyApp-abcxyz", "Build"
+        )
+        #expect(DeletionSafetyPolicy.evaluate(url) == .allow)
+    }
+
+    @Test
+    func npmCache() {
+        let url = TestPaths.homeURL(".npm", "_cacache")
+        #expect(DeletionSafetyPolicy.evaluate(url) == .allow)
+    }
+
+    @Test
+    func gradleCaches() {
+        let url = TestPaths.homeURL(".gradle", "caches")
+        #expect(DeletionSafetyPolicy.evaluate(url) == .allow)
+    }
+
+    @Test
+    func diagnosticReports() {
+        let url = TestPaths.homeURL("Library", "Logs", "DiagnosticReports")
+        #expect(DeletionSafetyPolicy.evaluate(url) == .allow)
+    }
+
+    /// An Electron app's HTTP cache is allowed by its shape: Chromium's marker
+    /// file in the app folder and `Cache_Data` inside. The name alone is not enough.
+    @Test(arguments: ["Slack", "Cursor"])
+    func electronHTTPCache(appName: String) throws {
+        let home = try TestPaths.makeFakeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let app = home.appendingPathComponent("Library/Application Support/\(appName)", isDirectory: true)
+        let cache = app.appendingPathComponent("Cache", isDirectory: true)
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        #expect(!DeletionSafetyPolicy.isWhitelistedApplicationSupportCachePath(cache.path, home: home.path))
+
+        try Data().write(to: app.appendingPathComponent("Local State"))
+        #expect(!DeletionSafetyPolicy.isWhitelistedApplicationSupportCachePath(cache.path, home: home.path))
+
+        try FileManager.default.createDirectory(at: cache.appendingPathComponent("Cache_Data"), withIntermediateDirectories: true)
+        #expect(DeletionSafetyPolicy.isWhitelistedApplicationSupportCachePath(cache.path, home: home.path))
+    }
+
+    // ~/Library/Application Support/JetBrains holds plugins and settings, not caches.
+    // It must be refused whole and deep, even for descendants named "Cache" that the
+    // generic Application Support rule would otherwise allow. The real cache under
+    // ~/Library/Caches/JetBrains stays allowed.
+    @Test
+    func jetBrainsApplicationSupportRootIsBlocked() {
+        let url = TestPaths.homeURL("Library", "Application Support", "JetBrains")
+        #expect(DeletionSafetyPolicy.evaluate(url) == .blockedNeverDelete)
+    }
+
+    @Test
+    func jetBrainsApplicationSupportCacheDescendantIsBlocked() {
+        let url = TestPaths.homeURL(
+            "Library", "Application Support", "JetBrains",
+            "IntelliJIdea2024.1", "plugins", "some-plugin", "Cache"
+        )
+        #expect(DeletionSafetyPolicy.evaluate(url) == .blockedNeverDelete)
+    }
+
+    /// The folder as a whole holds each IDE's LocalHistory, so only an IDE
+    /// folder's other children are offered.
+    @Test
+    func jetBrainsCachesAreAllowedExceptLocalHistory() {
+        let root = TestPaths.homeURL("Library", "Caches", "JetBrains")
+        #expect(DeletionSafetyPolicy.evaluate(root) == .blockedNeverDelete)
+        let index = TestPaths.homeURL("Library", "Caches", "JetBrains", "IntelliJIdea2024.1", "index")
+        #expect(DeletionSafetyPolicy.evaluate(index) == .allow)
+        let history = TestPaths.homeURL("Library", "Caches", "JetBrains", "IntelliJIdea2024.1", "LocalHistory")
+        #expect(DeletionSafetyPolicy.evaluate(history) == .blockedNeverDelete)
+    }
+}
+
+// MARK: - Group 3b: Adobe media caches under Application Support
+
+@Suite("Adobe media caches are allowed only at their default locations")
+struct AdobeMediaCacheTests {
+    @Test
+    func mediaCacheFilesRootIsAllowed() {
+        let url = TestPaths.homeURL(
+            "Library", "Application Support", "Adobe", "Common", "Media Cache Files"
+        )
+        #expect(DeletionSafetyPolicy.evaluate(url) == .allow)
+    }
+
+    @Test
+    func mediaCacheDatabaseRootIsAllowed() {
+        let url = TestPaths.homeURL(
+            "Library", "Application Support", "Adobe", "Common", "Media Cache"
+        )
+        #expect(DeletionSafetyPolicy.evaluate(url) == .allow)
+    }
+
+    @Test
+    func mediaCacheFilesDescendantIsAllowed() {
+        let url = TestPaths.homeURL(
+            "Library", "Application Support", "Adobe", "Common", "Media Cache Files",
+            "1a2b3c.mcdb"
+        )
+        #expect(DeletionSafetyPolicy.evaluate(url) == .allow)
+    }
+
+    @Test
+    func siblingWithMediaCachePrefixIsNotAllowed() {
+        // "Media Cache" must not act as a prefix for an unrelated sibling folder.
+        let url = TestPaths.homeURL(
+            "Library", "Application Support", "Adobe", "Common", "Media Cache Extras"
+        )
+        #expect(DeletionSafetyPolicy.evaluate(url) == .blockedNotWhitelisted)
+    }
+
+    @Test
+    func projectLocalMediaCacheIsNotAllowed() {
+        // A media cache the user parked next to a project must never be offered —
+        // only the default Application Support locations are whitelisted.
+        let url = TestPaths.homeURL(
+            "Documents", "MyEdit", "Adobe", "Common", "Media Cache Files"
+        )
+        #expect(DeletionSafetyPolicy.evaluate(url) == .blockedNotWhitelisted)
+        #expect(!DeletionSafetyPolicy.isOfferedForCleanup(url))
+    }
+
+    @Test
+    func discoveryTargetsOnlyDefaultAppSupportLocations() throws {
+        for entry in CacheDiscoveryPaths.adobeMediaCacheEntries {
+            #expect(entry.relative.hasPrefix("Adobe/Common/"), "unexpected root: \(entry.relative)")
+        }
+        let fakeHome = try TestPaths.makeFakeHome()
+        defer { try? FileManager.default.removeItem(at: fakeHome) }
+        let common = fakeHome.appendingPathComponent("Library/Application Support/Adobe/Common", isDirectory: true)
+        for name in ["Media Cache Files", "Media Cache", "Media Cache Extras"] {
+            try FileManager.default.createDirectory(
+                at: common.appendingPathComponent(name, isDirectory: true), withIntermediateDirectories: true
+            )
+        }
+        // A media cache parked next to a project is not a default location.
+        try FileManager.default.createDirectory(
+            at: fakeHome.appendingPathComponent("Documents/MyEdit/Adobe/Common/Media Cache Files", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+
+        // Discovery surfaces the two default locations and nothing else, and each
+        // passes the results-boundary guard.
+        let surfaced = CacheDiscoveryPaths.adobeMediaCacheURLs(home: fakeHome)
+        #expect(Set(surfaced.map(\.url.lastPathComponent)) == ["Media Cache Files", "Media Cache"])
+        for item in surfaced {
+            #expect(item.url.standardizedFileURL.path.hasPrefix(common.standardizedFileURL.path + "/"))
+            #expect(DeletionSafetyPolicy.isOfferedForCleanup(try TestPaths.inRealHome(item.url, from: fakeHome)))
+        }
+    }
+}
+
+// MARK: - Group 3c: Telegram media cache in the Group Container
+
+@Suite("Telegram media cache is allowed only at .../account-*/postbox/media")
+struct TelegramMediaCacheTests {
+    private static let container = [
+        "Library", "Group Containers", "6N38VWS5BX.ru.keepcoder.Telegram"
+    ]
+
+    private static func mediaURL(channel: String, account: String, extra: String...) -> URL {
+        TestPaths.homeURL(container + [channel, account, "postbox", "media"] + extra)
+    }
+
+    @Test
+    func mediaDirectoryItselfIsAllowed() {
+        let url = Self.mediaURL(channel: "stable", account: "account-1")
+        #expect(DeletionSafetyPolicy.evaluate(url) == .allow)
+    }
+
+    @Test
+    func mediaDescendantIsAllowed() {
+        let url = Self.mediaURL(channel: "appstore", account: "account-42", extra: "0", "cached.jpg")
+        #expect(DeletionSafetyPolicy.evaluate(url) == .allow)
+    }
+
+    @Test
+    func postboxDatabaseIsNeverAllowed() {
+        // The account database lives directly in `postbox`; nothing shallower
+        // than `postbox/media` may ever be authorized for deletion.
+        let postbox = TestPaths.homeURL(Self.container + ["stable", "account-1", "postbox"])
+        #expect(DeletionSafetyPolicy.evaluate(postbox) != .allow)
+
+        let db = TestPaths.homeURL(Self.container + ["stable", "account-1", "postbox", "db"])
+        #expect(DeletionSafetyPolicy.evaluate(db) != .allow)
+    }
+
+    @Test
+    func accountAndContainerRootsAreNeverAllowed() {
+        let account = TestPaths.homeURL(Self.container + ["stable", "account-1"])
+        #expect(DeletionSafetyPolicy.evaluate(account) != .allow)
+
+        let channel = TestPaths.homeURL(Self.container + ["stable"])
+        #expect(DeletionSafetyPolicy.evaluate(channel) != .allow)
+
+        let root = TestPaths.homeURL(Self.container)
+        #expect(DeletionSafetyPolicy.evaluate(root) != .allow)
+    }
+
+    @Test
+    func siblingOfMediaIsNeverAllowed() {
+        // A "media"-prefixed sibling under postbox must not slip through.
+        let url = TestPaths.homeURL(
+            Self.container + ["stable", "account-1", "postbox", "media-old"]
+        )
+        #expect(DeletionSafetyPolicy.evaluate(url) != .allow)
+    }
+
+    @Test
+    func nonAccountFolderIsNeverAllowed() {
+        // The second segment must be `account-*`; a stray folder cannot match.
+        let url = TestPaths.homeURL(
+            Self.container + ["stable", "notanaccount", "postbox", "media"]
+        )
+        #expect(DeletionSafetyPolicy.evaluate(url) != .allow)
+    }
+
+    @Test
+    func onlyTheMediaDirectoryIsClearedContentsOnly() {
+        let media = Self.mediaURL(channel: "stable", account: "account-1")
+        #expect(DeletionSafetyPolicy.shouldDeleteContentsOnly(media))
+
+        // A descendant is deleted outright (as normal contents), not contents-only.
+        let child = Self.mediaURL(channel: "stable", account: "account-1", extra: "0")
+        #expect(!DeletionSafetyPolicy.shouldDeleteContentsOnly(child))
+
+        // The postbox directory is never a contents-only target either.
+        let postbox = TestPaths.homeURL(Self.container + ["stable", "account-1", "postbox"])
+        #expect(!DeletionSafetyPolicy.shouldDeleteContentsOnly(postbox))
+    }
+
+    @Test
+    func discoverySurfacesOnlyPostboxMediaThatPassesTheGuard() throws {
+        // A Telegram layout in a temporary home, so the test never opens the
+        // user's real container.
+        let fakeHome = try TestPaths.makeFakeHome()
+        defer { try? FileManager.default.removeItem(at: fakeHome) }
+        let container = fakeHome.appendingPathComponent(Self.container.joined(separator: "/"), isDirectory: true)
+        for relative in [
+            "stable/account-1/postbox/media",
+            "stable/account-1/postbox/db",
+            "account-2/postbox/media",
+            "stable/account-3/postbox",
+            "stable/notes/postbox/media",
+            "stable/nested/account-4/postbox/media",
+        ] {
+            try FileManager.default.createDirectory(
+                at: container.appendingPathComponent(relative, isDirectory: true), withIntermediateDirectories: true
+            )
+        }
+
+        let surfaced = CacheDiscoveryPaths.telegramMediaCacheURLs(home: fakeHome)
+        let root = container.standardizedFileURL.path + "/"
+        #expect(Set(surfaced.map { String($0.url.standardizedFileURL.path.dropFirst(root.count)) })
+            == ["stable/account-1/postbox/media", "account-2/postbox/media"])
+        for item in surfaced {
+            #expect(item.key == "Telegram Media Cache")
+            #expect(DeletionSafetyPolicy.isOfferedForCleanup(try TestPaths.inRealHome(item.url, from: fakeHome)))
+        }
+    }
+
+    @Test
+    func accountsDirectlyUnderTheContainerRootAreAllowed() {
+        // The distribution-channel segment is optional; some installs keep
+        // `account-*` at the container root.
+        let media = TestPaths.homeURL(Self.container + ["account-7", "postbox", "media"])
+        #expect(DeletionSafetyPolicy.evaluate(media) == .allow)
+        #expect(DeletionSafetyPolicy.shouldDeleteContentsOnly(media))
+
+        let db = TestPaths.homeURL(Self.container + ["account-7", "postbox", "db"])
+        #expect(DeletionSafetyPolicy.evaluate(db) != .allow)
+    }
+
+    @Test
+    func accountSettingsFilesAreNeverAllowed() {
+        // Account-level settings/database files sit beside `postbox`, not below
+        // `media`, so no tier may reach them.
+        let settings = TestPaths.homeURL(
+            Self.container + ["stable", "account-1", "settings.db"]
+        )
+        #expect(DeletionSafetyPolicy.evaluate(settings) != .allow)
+
+        let accountDB = TestPaths.homeURL(
+            Self.container + ["stable", "account-1", "postbox", "db", "db_sqlite"]
+        )
+        #expect(DeletionSafetyPolicy.evaluate(accountDB) != .allow)
+    }
+
+    @Test
+    func mediaCannotTraverseOutToASiblingOfItself() {
+        // `..` traversal out of `media` must not stay authorized: the policy
+        // standardizes the path first, so the escape resolves to `postbox/db`
+        // and is refused.
+        let escape = Self.mediaURL(
+            channel: "stable", account: "account-1", extra: "..", "db"
+        )
+        #expect(escape.standardizedFileURL.path.hasSuffix("/postbox/db"))
+        #expect(DeletionSafetyPolicy.evaluate(escape) != .allow)
+
+        let escapeToPostbox = Self.mediaURL(channel: "stable", account: "account-1", extra: "..")
+        #expect(DeletionSafetyPolicy.evaluate(escapeToPostbox) != .allow)
+
+        // ...and a deeper traversal cannot climb back out to the container root.
+        let escapeToRoot = Self.mediaURL(
+            channel: "stable", account: "account-1", extra: "..", "..", ".."
+        )
+        #expect(DeletionSafetyPolicy.evaluate(escapeToRoot) != .allow)
+    }
+
+    @Test
+    func mediaSuffixIsNotMatchedAtArbitraryDepth() {
+        // A nested `account-*/postbox/media` triple buried deeper in the
+        // container is not the real media store and must not be authorized.
+        let deep = TestPaths.homeURL(
+            Self.container + ["stable", "extra", "account-1", "postbox", "media"]
+        )
+        #expect(DeletionSafetyPolicy.evaluate(deep) != .allow)
+    }
+}
+
+// MARK: - Group 3d: Telegram's two locations sit in different tiers
+
+@Suite("Telegram cache is Safe to Clean; Telegram media store is Check First")
+struct TelegramSafetyTierTests {
+    private static func level(folderName: String, path: URL) -> SafetyLevel? {
+        if let record = ExplanationDatabase.matchBundledDatabase(folderName: folderName) {
+            return record.safetyLevel
+        }
+        return SafetyTierList.evaluate(folderName: folderName, path: path)
+    }
+
+    @Test
+    func pureCacheUnderLibraryCachesIsSafeToClean() {
+        // ~/Library/Caches/ru.keepcoder.Telegram — an evictable HTTP-style cache.
+        // Worst case on deletion is a rebuild.
+        let file = TestPaths.homeURL(
+            "Library", "Caches", "ru.keepcoder.Telegram", "cache", "blob-1"
+        )
+        #expect(DeletionSafetyPolicy.evaluate(file) == .allow)
+        #expect(Self.level(folderName: "ru.keepcoder.Telegram", path: file) == .safe)
+    }
+
+    @Test
+    func groupContainerMediaStoreIsCheckFirst() {
+        // The media store holds re-downloadable media, but also self-destruct and
+        // server-deleted content whose only copy is local — reviewable, never one-tap.
+        let media = TestPaths.homeURL([
+            "Library", "Group Containers", "6N38VWS5BX.ru.keepcoder.Telegram",
+            "stable", "account-1", "postbox", "media"
+        ])
+        #expect(DeletionSafetyPolicy.evaluate(media) == .allow)
+        #expect(
+            Self.level(folderName: CacheDiscoveryPaths.telegramMediaCacheKey, path: media) == .medium
+        )
+    }
+
+    @Test
+    func theTwoLocationsDoNotShareATier() {
+        let cacheLevel = Self.level(
+            folderName: "ru.keepcoder.Telegram",
+            path: TestPaths.homeURL("Library", "Caches", "ru.keepcoder.Telegram")
+        )
+        let mediaLevel = Self.level(
+            folderName: CacheDiscoveryPaths.telegramMediaCacheKey,
+            path: TestPaths.homeURL([
+                "Library", "Group Containers", "6N38VWS5BX.ru.keepcoder.Telegram",
+                "stable", "account-1", "postbox", "media"
+            ])
+        )
+        #expect(cacheLevel != mediaLevel)
+    }
+}
+
+// MARK: - Group 4: Whitelisted folder names inside home
+
+@Suite("Whitelisted folder names inside home return .allow")
+struct WhitelistedFolderNamesTests {
+    @Test(arguments: [
+        (["Developer", "myproject", "node_modules"], "node_modules"),
+        (["Developer", "myproject", "target"], "target"),
+        (["Developer", "myproject", "Pods"], "Pods"),
+        (["Developer", "myproject", ".gradle"], ".gradle"),
+        // Projects kept under Documents/Desktop/Downloads: the folder root is a hard
+        // never-delete, but nested whitelisted caches must remain cleanable.
+        (["Documents", "myproject", "node_modules"], "node_modules under Documents"),
+        (["Desktop", "myproject", "target"], "target under Desktop"),
+        (["Downloads", "myproject", ".venv"], ".venv under Downloads"),
+    ])
+    func whitelistedArtifactFolders(components: [String], label: String) {
+        let url = TestPaths.homeURL(components)
+        #expect(
+            DeletionSafetyPolicy.evaluate(url) == .allow,
+            "\(label): \(url.path)"
+        )
+    }
+}
+
+// MARK: - Group 5: Unlisted paths
+
+@Suite("Unlisted paths return .blockedNotWhitelisted or .blockedNeverDelete")
+struct UnlistedPathsTests {
+    @Test
+    func desktopFileIsNotOfferedForCleanup() {
+        // The user's own files under Desktop are not whitelisted caches, so they are
+        // skipped for safety (never offered for cleanup), but the folder root itself
+        // remains a hard never-delete so nested whitelisted caches can pass through.
+        let url = TestPaths.homeURL("Desktop", "important-file.txt")
+        #expect(DeletionSafetyPolicy.evaluate(url) == .blockedNotWhitelisted)
+        #expect(!DeletionSafetyPolicy.isOfferedForCleanup(url))
+    }
+
+    @Test
+    func documentsProjectIsNotOfferedForCleanup() {
+        let url = TestPaths.homeURL("Documents", "my-project")
+        #expect(DeletionSafetyPolicy.evaluate(url) == .blockedNotWhitelisted)
+        #expect(!DeletionSafetyPolicy.isOfferedForCleanup(url))
+    }
+
+    @Test
+    func sourceCodeFolderIsNotWhitelisted() {
+        let url = TestPaths.homeURL("Developer", "myproject", "src")
+        #expect(DeletionSafetyPolicy.evaluate(url) == .blockedNotWhitelisted)
+    }
+
+    @Test
+    func moviesFileIsNeverDelete() {
+        let url = TestPaths.homeURL("Movies", "myvideo.mp4")
+        #expect(DeletionSafetyPolicy.evaluate(url) == .blockedNeverDelete)
+    }
+
+    @Test
+    func appSupportRootIsNotWhitelisted() {
+        let url = TestPaths.homeURL("Library", "Application Support", "MyApp")
+        #expect(DeletionSafetyPolicy.evaluate(url) == .blockedNotWhitelisted)
+    }
+}
+
+// MARK: - Group 6: Admin-gated system paths
+
+@Suite("requiresAdminPrivileges gates system paths")
+struct AdminGatedSystemPathsTests {
+    @Test(arguments: [
+        "/Library/Caches",
+        "/Library/Caches/anything",
+        "/Library/Updates",
+        "/private/var/log",
+        "/private/var/log/system.log",
+        "/Library/Logs/DiagnosticReports",
+    ])
+    func requiresAdmin(path: String) {
+        let url = TestPaths.absoluteURL(path)
+        #expect(DeletionSafetyPolicy.requiresAdminPrivileges(for: url))
+        #expect(!DeletionSafetyPolicy.isOfferedForCleanup(url))
+    }
+}
+
+// MARK: - Group 7: Contents-only deletion
+
+@Suite("shouldDeleteContentsOnly fires for the right paths")
+struct ContentsOnlyDeletionTests {
+    @Test
+    func libraryLogs() {
+        let url = TestPaths.homeURL("Library", "Logs")
+        #expect(DeletionSafetyPolicy.shouldDeleteContentsOnly(url))
+    }
+
+    @Test
+    func libraryLogsDiagnosticReports() {
+        let url = TestPaths.homeURL("Library", "Logs", "DiagnosticReports")
+        #expect(DeletionSafetyPolicy.shouldDeleteContentsOnly(url))
+    }
+
+    @Test
+    func libraryCaches() {
+        let url = TestPaths.homeURL("Library", "Caches")
+        #expect(DeletionSafetyPolicy.shouldDeleteContentsOnly(url))
+    }
+
+    @Test
+    func derivedDataIsNotContentsOnly() {
+        let url = TestPaths.homeURL("Library", "Developer", "Xcode", "DerivedData")
+        #expect(!DeletionSafetyPolicy.shouldDeleteContentsOnly(url))
+    }
+
+    @Test
+    func npmCacheIsNotContentsOnly() {
+        let url = TestPaths.homeURL(".npm", "_cacache")
+        #expect(!DeletionSafetyPolicy.shouldDeleteContentsOnly(url))
+    }
+}
+
+// MARK: - Group 8: Music and Movies are fully protected
+
+@Suite("Music and Movies are protected at every depth")
+struct MediaFolderProtectionTests {
+    @Test(arguments: [
+        (["Music"], "Music root"),
+        (["Movies"], "Movies root"),
+        (["Music", "song.mp3"], "Music file"),
+        (["Movies", "clip.mov"], "Movies file"),
+        (["Music", "node_modules"], "Music whitelisted-name folder"),
+        (["Movies", "build"], "Movies whitelisted-name folder"),
+        (["Music", "project", "target"], "Music nested whitelisted-name folder"),
+    ])
+    func mediaPathsAreNeverDelete(components: [String], label: String) {
+        let url = TestPaths.homeURL(components)
+        #expect(
+            DeletionSafetyPolicy.evaluate(url) == .blockedNeverDelete,
+            "\(label): \(url.path)"
+        )
+        #expect(!DeletionSafetyPolicy.isOfferedForCleanup(url))
+    }
+}

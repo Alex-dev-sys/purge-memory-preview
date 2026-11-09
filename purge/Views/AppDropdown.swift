@@ -1,0 +1,328 @@
+import AppKit
+import SwiftUI
+
+/// Dropdown whose popup is pinned to its button: never narrower than the
+/// button, and with its left edge flush against the button's.
+///
+/// macOS places a native `Menu`'s popup itself — a few points to the left of
+/// the button and sized to its own content — which reads as misaligned next to
+/// the app's other controls, so the list is drawn here instead.
+///
+/// The list rides in a borderless child panel rather than a `.popover`, which
+/// always draws a callout arrow at the anchor edge.
+///
+/// The caller supplies the button's own look and applies its own
+/// `.buttonStyle(_:)`; the option rows override that with `.plain`.
+struct AppDropdown<Option: Hashable, Trigger: View>: View {
+    let options: [Option]
+    let selection: Option
+    let optionLabel: (Option) -> String
+    var isOptionEnabled: (Option) -> Bool = { _ in true }
+    let onSelect: (Option) -> Void
+    @ViewBuilder let trigger: Trigger
+
+    @State private var panel = AppDropdownPanelController()
+    @State private var triggerSize: CGSize = .zero
+    @State private var anchorView: NSView?
+
+    private static var rowFont: NSFont { .systemFont(ofSize: 13) }
+
+    /// Widest option label, plus the checkmark column, row padding and the
+    /// popup's own padding. Never less than the button's width.
+    ///
+    /// Chrome around the label: 12 (popup padding) + 16 (row padding) + 14
+    /// (checkmark) + 12 (two 6pt HStack gaps) + a little slack so the longest
+    /// label never clips.
+    private var popupWidth: CGFloat {
+        let widest = options
+            .map { (optionLabel($0) as NSString).size(withAttributes: [.font: Self.rowFont]).width }
+            .max() ?? 0
+        return max(triggerSize.width, ceil(widest) + 62)
+    }
+
+    var body: some View {
+        Button {
+            toggle()
+        } label: {
+            trigger
+        }
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(key: AppDropdownSizeKey.self, value: proxy.size)
+            }
+        )
+        .background(AppDropdownAnchor { anchorView = $0 })
+        .onPreferenceChange(AppDropdownSizeKey.self) { triggerSize = $0 }
+        // The open list is hosted apart from this view, so it would keep the
+        // rows it was opened with. An option that becomes available while the
+        // list is open, such as a size sort once measuring ends, stayed greyed
+        // out until the list was opened again (#183). The new values go in as
+        // plain values: this action sees the view from before the change, and
+        // a list rebuilt from its closures would look unchanged to SwiftUI.
+        .onChange(of: options.map(isOptionEnabled)) { enabled in
+            panel.update(width: popupWidth, content: AnyView(optionList(enabled: enabled, selection: selection)))
+        }
+        .onChange(of: selection) { newSelection in
+            panel.update(
+                width: popupWidth,
+                content: AnyView(optionList(enabled: options.map(isOptionEnabled), selection: newSelection))
+            )
+        }
+        .onDisappear { panel.dismiss() }
+    }
+
+    private func toggle() {
+        guard !panel.isVisible else {
+            panel.dismiss()
+            return
+        }
+        guard let anchorView else { return }
+        panel.present(from: anchorView, width: popupWidth) {
+            AnyView(optionList(enabled: options.map(isOptionEnabled), selection: selection))
+        }
+    }
+
+    private func optionList(enabled: [Bool], selection: Option) -> some View {
+        VStack(alignment: .leading, spacing: AppStyle.Spacing.xxxSmall) {
+            ForEach(Array(options.enumerated()), id: \.element) { index, option in
+                AppDropdownRow(
+                    label: optionLabel(option),
+                    isSelected: option == selection,
+                    isEnabled: enabled.indices.contains(index) && enabled[index]
+                ) {
+                    guard isOptionEnabled(option) else { return }
+                    onSelect(option)
+                    panel.dismiss()
+                }
+            }
+        }
+        .padding(AppStyle.Spacing.xxSmallPlus)
+        .frame(width: popupWidth)
+        .background(AppColors.surfaceRaised)
+        .overlay(
+            RoundedRectangle(cornerRadius: AppStyle.Radius.md, style: .continuous)
+                .strokeBorder(AppColors.borderSubtle)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: AppStyle.Radius.md, style: .continuous))
+    }
+}
+
+private struct AppDropdownRow: View {
+    let label: String
+    let isSelected: Bool
+    var isEnabled: Bool = true
+    let onSelect: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: AppStyle.Spacing.xxSmallPlus) {
+                // A label that is all figure, such as "5 MB", is SF Rounded
+                // alone, whose line is shorter than Onest's. The hidden Onest
+                // copy keeps every row the same height.
+                ZStack(alignment: .leading) {
+                    Text(verbatim: label)
+                        .font(AppStyle.Typography.body)
+                        .hidden()
+                        .accessibilityHidden(true)
+                    Text(figures: label, style: AppStyle.Typography.body)
+                        .foregroundStyle(AppColors.textPrimary)
+                }
+                .lineLimit(1)
+
+                Spacer(minLength: 0)
+
+                Image(systemName: "checkmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(AppColors.textPrimary)
+                    .opacity(isSelected ? 1 : 0)
+            }
+            .padding(.horizontal, AppStyle.Spacing.xSmall)
+            .padding(.vertical, AppStyle.Spacing.xxSmallPlus)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                isHovered && isEnabled ? AppColors.fillSecondary : .clear,
+                in: RoundedRectangle(cornerRadius: AppStyle.Radius.sm, style: .continuous)
+            )
+            .contentShape(Rectangle())
+            .opacity(isEnabled ? 1 : 0.4)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .onHover { isHovered = $0 }
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityHint(isEnabled ? "" : "Available after the scan finishes")
+    }
+}
+
+/// Hands back the `NSView` backing the trigger so the panel can be positioned
+/// against its on-screen frame.
+private struct AppDropdownAnchor: NSViewRepresentable {
+    let onResolve: (NSView) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { onResolve(view) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+/// Borderless child panel that carries the option list.
+@MainActor
+private final class AppDropdownPanelController {
+    private var panel: NSPanel?
+    private var hosting: NSHostingView<AnyView>?
+    private weak var anchor: NSView?
+    private var monitors: [Any] = []
+    private var observers: [NSObjectProtocol] = []
+
+    /// Gap between the button's bottom edge and the list.
+    private let verticalGap: CGFloat = AppStyle.Spacing.xxSmall
+
+    var isVisible: Bool { panel != nil }
+
+    func present(from anchor: NSView, width: CGFloat, content: () -> AnyView) {
+        dismiss()
+
+        guard let parent = anchor.window else { return }
+
+        let hosting = NSHostingView(rootView: content())
+        hosting.frame.size = NSSize(width: width, height: hosting.fittingSize.height)
+
+        let panel = NSPanel(
+            contentRect: hosting.frame,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        self.anchor = anchor
+        panel.contentView = hosting
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.isMovable = false
+        panel.hidesOnDeactivate = true
+        panel.level = .popUpMenu
+        panel.animationBehavior = .utilityWindow
+        panel.setFrameOrigin(origin(for: anchor, in: parent, size: hosting.frame.size))
+
+        parent.addChildWindow(panel, ordered: .above)
+        panel.orderFront(nil)
+        panel.invalidateShadow()
+
+        self.panel = panel
+        self.hosting = hosting
+        startWatching(parent: parent)
+    }
+
+    /// Redraws the open list with `content`. Does nothing while it is closed.
+    func update(width: CGFloat, content: AnyView) {
+        guard let panel, let hosting, let anchor, let parent = anchor.window else { return }
+        hosting.rootView = content
+        let size = NSSize(width: width, height: hosting.fittingSize.height)
+        hosting.frame.size = size
+        panel.setContentSize(size)
+        panel.setFrameOrigin(origin(for: anchor, in: parent, size: size))
+        panel.invalidateShadow()
+    }
+
+    func dismiss() {
+        monitors.forEach(NSEvent.removeMonitor)
+        monitors.removeAll()
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers.removeAll()
+
+        anchor = nil
+        hosting = nil
+        guard let panel else { return }
+        panel.parent?.removeChildWindow(panel)
+        panel.orderOut(nil)
+        self.panel = nil
+    }
+
+    /// True when the event is a mouse-down landing inside the trigger view, so
+    /// the outside-click monitor can leave it alone and let the trigger's own
+    /// `toggle()` dismiss an already-visible panel instead of reopening it.
+    private func isInsideAnchor(_ event: NSEvent) -> Bool {
+        guard let anchor, let window = anchor.window, event.window === window else { return false }
+        let frameInWindow = anchor.convert(anchor.bounds, to: nil)
+        return frameInWindow.contains(event.locationInWindow)
+    }
+
+    /// Below the button and left-aligned with it, flipped above when the
+    /// screen has no room underneath.
+    private func origin(for anchor: NSView, in parent: NSWindow, size: NSSize) -> NSPoint {
+        let anchorRect = parent.convertToScreen(anchor.convert(anchor.bounds, to: nil))
+        var x = anchorRect.minX
+        var y = anchorRect.minY - verticalGap - size.height
+
+        if let visible = (parent.screen ?? NSScreen.main)?.visibleFrame {
+            if y < visible.minY {
+                y = anchorRect.maxY + verticalGap
+            }
+            x = min(max(x, visible.minX), visible.maxX - size.width)
+        }
+
+        return NSPoint(x: x, y: y)
+    }
+
+    private func startWatching(parent: NSWindow) {
+        let outside: (NSEvent) -> Bool = { [weak self] event in
+            guard let self, let panel = self.panel else { return false }
+            // A click on the trigger is technically outside the panel, but the
+            // trigger's own action toggles the panel — dismissing here would let
+            // it immediately reopen. Leave those clicks to `toggle()`.
+            if self.isInsideAnchor(event) { return false }
+            return event.window !== panel
+        }
+
+        if let local = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
+        ) { [weak self] event in
+            if outside(event) { self?.dismiss() }
+            return event
+        } {
+            monitors.append(local)
+        }
+
+        if let global = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { [weak self] _ in
+            self?.dismiss()
+        } {
+            monitors.append(global)
+        }
+
+        if let key = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53 else { return event }  // Escape
+            self?.dismiss()
+            return nil
+        } {
+            monitors.append(key)
+        }
+
+        for name in [NSWindow.didResignKeyNotification, NSWindow.willCloseNotification] {
+            observers.append(
+                NotificationCenter.default.addObserver(
+                    forName: name,
+                    object: parent,
+                    queue: .main
+                ) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.dismiss() }
+                }
+            )
+        }
+    }
+}
+
+private struct AppDropdownSizeKey: PreferenceKey {
+    static var defaultValue: CGSize = .zero
+
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        value = nextValue()
+    }
+}

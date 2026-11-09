@@ -1,0 +1,184 @@
+import Foundation
+
+enum SafetyTierList {
+
+    /// Folders we are 100% certain are safe to delete.
+    /// These are always regenerated automatically with zero data loss.
+    nonisolated static let definitelySafe: Set<String> = [
+        "node_modules",
+        "DerivedData",
+        ".next",
+        ".nuxt",
+        ".turbo",
+        ".parcel-cache",
+        "__pycache__",
+        ".gradle",
+        "target",
+        "build",
+        "dist",
+        "out",
+        ".cache",
+        "venv",
+        ".venv",
+        "_cacache",
+        "_npx",
+        "_logs",
+        "GPUCache",
+        "ShaderCache",
+        "CachedData",
+        "Code Cache",
+        "DawnWebGPUCache",
+        "component_crx_cache",
+        "DocumentationCache",
+        "LinkThumbnail",
+        "ChatMedia",
+        "AppInstallationBinaryDeltas",
+        "corepack",
+        "Homebrew",
+        "yarn",
+        "pnpm",
+        "pip",
+        "cocoapods",
+        "Pods",
+        ".dart_tool"
+    ]
+
+    /// Bundle ID prefixes we are certain are safe app caches.
+    /// These are standard app cache folders that apps recreate automatically.
+    nonisolated static let definitelySafeBundlePrefixes: [String] = [
+        "com.google.Chrome",
+        // Not "com.apple.Safari": as a prefix it also matched Safari's bookmark and
+        // history sync agents. Safari's own cache is matched by bundle ID instead.
+        "org.mozilla.firefox",
+        "com.brave.Browser",
+        "company.thebrowser.Browser",
+        "com.spotify.client",
+        "com.tinyspeck.slackmacgap",
+        "com.figma.desktop",
+        "us.zoom.xos",
+        "com.microsoft.VSCode",
+        "com.todesktop",
+        "com.raycast.macos",
+        "com.runningwithcrayons.Alfred",
+        "com.hnc.Discord",
+        "net.whatsapp.WhatsApp",
+        "ru.keepcoder.Telegram",
+        "notion.id",
+        "com.linear",
+        "com.loom.desktop",
+        "com.grammarly",
+        "com.ollama.ollama",
+        "com.microsoft.teams"
+    ]
+
+    /// Folders that involve user data, syncing, or an index the system has to
+    /// rebuild. Safe to delete technically, but each one costs the user
+    /// something visible afterwards — a re-sync, a re-index, or a sign-in — so
+    /// they are excluded from one-click and scheduled cleanup.
+    nonisolated static let checkFirst: Set<String> = [
+        "com.apple.Spotlight",
+        "com.apple.mail",
+        "com.apple.Photos",
+        "com.apple.Music",
+        "com.apple.Maps",
+        "com.apple.GeoServices",
+        "com.dropbox.client2",
+        "com.google.GoogleDrive",
+        "com.google.drivefs",
+        "com.microsoft.OneDrive",
+        "com.apple.cloudd",
+        "com.1password.1password",
+        "com.apple.icloud"
+    ]
+
+    /// `<…>/Library/Application Support/<App>/<cache>`, checked against the app
+    /// folder with `CacheDiscoveryPaths.isApplicationSupportCachePath`.
+    private nonisolated static func isApplicationSupportChromiumCache(_ path: URL) -> Bool {
+        let components = path.standardizedFileURL.pathComponents
+        guard let index = components.indices.dropLast().first(where: {
+            components[$0] == "Library" && components[$0 + 1] == "Application Support"
+        }) else { return false }
+        let appIndex = index + 2
+        guard components.count > appIndex + 1 else { return false }
+        let appRoot = URL(
+            fileURLWithPath: NSString.path(withComponents: Array(components[...appIndex])),
+            isDirectory: true
+        )
+        return CacheDiscoveryPaths.isApplicationSupportCachePath(
+            Array(components[(appIndex + 1)...]),
+            appRoot: appRoot
+        )
+    }
+
+    nonisolated static func evaluate(folderName: String, path: URL? = nil) -> SafetyLevel? {
+        let lower = folderName.lowercased()
+
+        if let path {
+            let pathLower = path.standardizedFileURL.path.lowercased()
+            // Never a `Service Worker` cache: its loss removes sites' workers and
+            // their web push subscriptions (`CacheDiscoveryPaths`).
+            if pathLower.contains("/service worker/") {
+                return nil
+            }
+            if pathLower.contains("/gpucache")
+                || pathLower.contains("/shadercache")
+                || pathLower.contains("/code cache")
+                || pathLower.contains("/cacheddata")
+                || pathLower.contains("/component_crx_cache")
+                || pathLower.contains("/crashpad/completed")
+                || pathLower.contains("/linkthumbnail")
+                || pathLower.contains("/chatmedia")
+                || pathLower.contains("/appinstallationbinarydeltas") {
+                return .safe
+            }
+            // An Electron or Chromium app's cache under Application Support, in the
+            // shape the scan lists and the deletion policy allows. The shape decides,
+            // not the name: a folder merely named Cache could be anything.
+            if isApplicationSupportChromiumCache(path) {
+                return .safe
+            }
+            // Spotlight index data regenerates on its own, but search is slow or
+            // incomplete until it does — a visible inconvenience, so never part
+            // of one-click cleanup.
+            if pathLower.contains("/spotlight/") || pathLower.contains("com.apple.spotlight") {
+                return .medium
+            }
+            if pathLower.contains(".app/contents/frameworks/") && pathLower.contains("/versions/") {
+                return .medium
+            }
+            if pathLower.contains("/.cursor/projects/")
+                || AgentWorktreeScanPolicy.looksLikeAgentWorktreePath(
+                    path,
+                    home: FileManager.default.homeDirectoryForCurrentUser
+                ) {
+                return .medium
+            }
+        }
+
+        if lower == "stale-browser-framework" {
+            return .medium
+        }
+
+        if lower.hasSuffix(".shipit") {
+            return .safe
+        }
+
+        // Check definitely safe folder names
+        if definitelySafe.contains(where: { lower == $0.lowercased() }) {
+            return .safe
+        }
+
+        // Check definitely safe bundle ID prefixes
+        for prefix in definitelySafeBundlePrefixes where lower.hasPrefix(prefix.lowercased()) {
+            return .safe
+        }
+
+        // Check check first
+        if checkFirst.contains(where: { lower == $0.lowercased() }) {
+            return .medium
+        }
+
+        // Unknown, let AI decide
+        return nil
+    }
+}

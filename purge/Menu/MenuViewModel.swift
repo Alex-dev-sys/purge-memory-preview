@@ -1,0 +1,446 @@
+import AppKit
+import Combine
+import Foundation
+import SwiftUI
+
+/// Live state for the menu bar dropdown. Never render `clear` or `ready`
+/// without a backing scan: the cold/default state is `checking`.
+enum MenuState: Equatable {
+    case checking
+    case clear(lastScanned: Date)
+    case ready(bytes: Int64, lastScanned: Date)
+    case cleaning(cleaned: Int64, total: Int64)
+    case cleaned(bytes: Int64)
+}
+
+/// Owns the menu's live state and timing. Reuses `PurgeStore`'s existing scan
+/// and clean entry points; it never reimplements scanning or deletion, so the
+/// `DeletionSafetyPolicy` allowlist and trash-by-default path stay intact.
+@MainActor
+final class MenuViewModel: ObservableObject {
+    /// Single source of truth for how long a cached scan stays fresh. Opening
+    /// the menu always shows the cached result; past this age it also kicks off
+    /// a silent background refresh that updates the number in place.
+    static let stalenessWindow: TimeInterval = 60 * 60
+    /// How long the "cleaned" hero dwells before settling on what is left.
+    private static let cleanedDwellNanoseconds: UInt64 = 1_800_000_000
+    /// One spring for every hero state swap (and the checking word cycle) so
+    /// the whole menu moves with the same soft, non-bouncy feel.
+    static let swapAnimation = Animation.spring(response: 0.4, dampingFraction: 0.9)
+
+    @Published private(set) var state: MenuState = .checking
+
+    /// The dropdown panel window, handed over by `MenuOpenDetector`. When a
+    /// menu-initiated scan or notification-initiated clean resolves while the
+    /// panel is closed, the outcome is surfaced as a notification instead.
+    weak var panelWindow: NSWindow?
+    /// True between a menu "Scan now" click and its resolution.
+    private var menuScanArmed = false
+    /// True between the notification Clean action and the cleaned state.
+    private(set) var cleanFromNotification = false
+    /// True when the notification's Clean action came in while a scan was
+    /// running. The clean starts once the scan settles.
+    private var notificationCleanAwaitsScan = false
+
+    private weak var store: PurgeStore?
+    private var hasAttached = false
+    private var wakeObserver: NSObjectProtocol?
+    /// The in-flight scan or clean. Cancelled when superseded.
+    private var activeWorkTask: Task<Void, Never>?
+    /// Silent rescan that never leaves the ready/clear state. Cancelled when a
+    /// forced scan or clean supersedes it.
+    private var backgroundRefreshTask: Task<Void, Never>?
+    /// `lastScanCompletedAt` is persisted across launches but scan results are
+    /// not, so a cached number is only renderable after a scan this session.
+    private var hasSessionScan = false
+    private var cancellables = Set<AnyCancellable>()
+    /// True once `isScanningAll` has been observed high, so the subscription
+    /// only settles state on real completions, not on the initial `false`.
+    private var storeScanWasInFlight = false
+    /// True when `attach` skipped the launch scan. The first menu open runs it,
+    /// unless a scan started elsewhere first.
+    private var launchScanPending = false
+
+    /// True while a scan or clean is in flight; gates re-entrant scans/cleans.
+    var isBusy: Bool {
+        switch state {
+        case .checking, .cleaning, .cleaned: return true
+        case .clear, .ready: return store?.isDeleting ?? false
+        }
+    }
+
+    /// Wires up the store and performs the one-time launch scan + wake observer.
+    /// Idempotent: safe to call from multiple lifecycle hooks.
+    ///
+    /// `scansAtLaunch` is false when the deleted-apps watcher started Purge
+    /// windowless: that Purge shows one review and quits again, so a full App
+    /// Caches and Dev Tools scan would only walk the disk for seconds of life.
+    /// The scan then waits for the first menu open, or for the window (#177).
+    func attach(store: PurgeStore, scansAtLaunch: Bool = true) {
+        guard !hasAttached else { return }
+        hasAttached = true
+        self.store = store
+        registerWakeObserver()
+        observeStoreScans(store)
+        if scansAtLaunch {
+            // Scan on app launch.
+            runScan(forced: true)
+        } else {
+            launchScanPending = true
+        }
+    }
+
+    /// `PurgeStore.scanAll` cancels-and-restarts any in-flight scan, so the
+    /// menu's own `await` can return early with partial data when another
+    /// caller (main window, onboarding) supersedes its scan — resolving there
+    /// would render "all clear" off an empty snapshot. Completion is derived
+    /// from the store's published flag instead: the menu only settles on
+    /// numbers from a scan that actually finished, whoever started it.
+    private func observeStoreScans(_ store: PurgeStore) {
+        store.$isScanningAll
+            // A supersession dips the flag false for one beat between the
+            // cancelled scan's teardown and the new scan's start; debouncing
+            // rides over the dip so only a settled completion resolves state.
+            .debounce(for: .milliseconds(200), scheduler: RunLoop.main)
+            .removeDuplicates()
+            .sink { [weak self] isScanning in
+                guard let self else { return }
+                if isScanning {
+                    storeScanWasInFlight = true
+                    // The window's own launch scan counts as the one this skipped.
+                    launchScanPending = false
+                    return
+                }
+                guard storeScanWasInFlight else { return }
+                storeScanWasInFlight = false
+                // Cleaning owns its own state flow; everything else settles
+                // to the fresh numbers (including the first `.checking`).
+                switch state {
+                case .checking, .ready, .clear: resolveAfterScan()
+                case .cleaning, .cleaned: break
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    deinit {
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        }
+    }
+
+    private func registerWakeObserver() {
+        // Refresh on wake, but only when the cached scan has gone stale.
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.refreshAfterWake() }
+        }
+    }
+
+    /// Wake is opportunistic, not user-initiated: keep the cached number and
+    /// only refresh silently when it is stale, so repeated lid-opens never turn
+    /// into repeated full disk scans. Skipped entirely in Low Power Mode — the
+    /// next menu open still refreshes, so the user never sees stale data.
+    private func refreshAfterWake() {
+        guard let store, hasSessionScan, !isBusy else { return }
+        guard let scannedAt = store.lastScanCompletedAt,
+              Date().timeIntervalSince(scannedAt) > Self.stalenessWindow else { return }
+        guard !ProcessInfo.processInfo.isLowPowerModeEnabled else { return }
+        startBackgroundRefresh()
+    }
+
+    /// Called whenever the menu panel becomes visible/key.
+    /// Always shows the cached result immediately; when the cache is stale it
+    /// additionally refreshes in the background, updating the number in place.
+    /// Only falls back to a blocking scan when there is nothing to show yet.
+    func menuDidOpen() {
+        guard let store else { return }
+        // The user has the panel now, with its own Clean button.
+        notificationCleanAwaitsScan = false
+        // A finished scan can be invisible here: completion arrives via a
+        // debounced sink on RunLoop.main, and menu tracking stalls the main
+        // queue — opening the menu inside that window (or holding it open
+        // through completion) leaves state stuck at `.checking` even though
+        // the store already has results. Resolve synchronously off the store
+        // so opening always shows a finished scan immediately. Results from
+        // this session only: `lastScanCompletedAt` outlives the launch, and a
+        // launch that skipped its scan has nothing to show until one runs (#177).
+        if case .checking = state,
+           !store.isScanningAll,
+           activeWorkTask == nil, backgroundRefreshTask == nil,
+           store.hasSessionResults(for: .cachesAndDevTools) {
+            // A scan the window ran is the launch scan this skipped, even one
+            // over too quickly for the debounced sink to see it start.
+            launchScanPending = false
+            resolveAfterScan(animated: false)
+        }
+        // A launch that skipped its scan: the first open runs it, as the launch
+        // would have, so the menu never settles on numbers no scan produced.
+        // While a clean runs no scan can start, and checking is the cold state
+        // until the next open.
+        if launchScanPending {
+            runScan(forced: true)
+            return
+        }
+        guard !isBusy else { return }
+        guard hasSessionScan, let scannedAt = store.lastScanCompletedAt else {
+            runScan(forced: false)
+            return
+        }
+        // Never animate at open time: this fires before the panel is laid out,
+        // and an animated transaction would capture the initial layout pass and
+        // scale the whole panel in from a corner. Animations are only for
+        // changes that happen while the panel is already visible.
+        resolveFromCache(animated: false)
+        if Date().timeIntervalSince(scannedAt) > Self.stalenessWindow {
+            startBackgroundRefresh()
+        }
+    }
+
+    /// Manual "scan now": always rescans, ignoring the staleness window.
+    func scanNow() {
+        menuScanArmed = true
+        runScan(forced: true, rescan: true)
+    }
+
+    /// Entry point for the notification's Clean action. Routes through the same
+    /// guarded, trash-by-default clean the menu uses.
+    ///
+    /// The action can relaunch or wake Purge, so a scan may still be running.
+    /// The clean then waits for it. When nothing is left to clean, the tap gets
+    /// an answer instead of silence, and no flag is left set for a later clean
+    /// from the panel to pick up (#183).
+    func performCleanFromNotification() {
+        switch state {
+        case .cleaning, .cleaned:
+            // A clean is running already. It says how it went when it ends, and
+            // this tap must not change that: clearing the flag here dropped the
+            // banner of a clean another tap started.
+            return
+        case .checking:
+            // Only a scan that is running is worth waiting for. A windowless
+            // launch has run none, and waiting for whichever scan comes next
+            // could start a clean hours after the tap.
+            if isCachesScanInFlight {
+                notificationCleanAwaitsScan = true
+            }
+            return
+        case .clear, .ready:
+            break
+        }
+        cleanFromNotification = true
+        guard clean() else {
+            cleanFromNotification = false
+            if case .clear = state, !isPanelVisible {
+                Task { await MenuScanNotifier.notifyScanResult(readyBytes: 0) }
+            }
+            return
+        }
+    }
+
+    private var isPanelVisible: Bool {
+        panelWindow?.isVisible ?? false
+    }
+
+    private var isCachesScanInFlight: Bool {
+        guard let store else { return false }
+        return store.isScanningAll
+            || store.scanQueue.active == .cachesAndDevTools
+            || store.isScanQueued(.cachesAndDevTools)
+    }
+
+    /// Settles on what a clean would take now. The sidebar total also counts
+    /// rows the clean refuses on the spot, such as the CLI version a link now
+    /// points at, so Ready from that total could sit beside a Clean that does
+    /// nothing (#183).
+    private func settleOnCleanableBytes() {
+        guard let store, let date = store.lastScanCompletedAt else {
+            resolveFromCache()
+            return
+        }
+        let bytes = store.manualSafeCleanupCandidates().reduce(Int64(0)) { $0 + $1.sizeBytes }
+        setState(bytes > 0 ? .ready(bytes: bytes, lastScanned: date) : .clear(lastScanned: date))
+    }
+
+    private func resolveFromCache(animated: Bool = true) {
+        guard let store, let date = store.lastScanCompletedAt else {
+            runScan(forced: false)
+            return
+        }
+        let bytes = store.safeRecoverableBytes
+        setState(
+            bytes > 0 ? .ready(bytes: bytes, lastScanned: date) : .clear(lastScanned: date),
+            animated: animated
+        )
+    }
+
+    /// Animates only genuine state changes: identical writes are dropped so the
+    /// `withAnimation` transaction never captures unrelated pending layout
+    /// (such as the panel's first layout pass, or a reopen).
+    private func setState(_ newState: MenuState, animated: Bool = true) {
+        guard newState != state else { return }
+        guard animated else {
+            state = newState
+            return
+        }
+        withAnimation(Self.swapAnimation) { state = newState }
+    }
+
+    /// Rescans without leaving the ready/clear state: the menu keeps showing
+    /// the cached number and it updates in place when the scan lands.
+    private func startBackgroundRefresh() {
+        // A scan already running or waiting in the queue will refresh the number
+        // anyway; asking again would only scan the same folders twice.
+        guard let store, backgroundRefreshTask == nil, !store.isDeleting,
+              !store.isScanningAll,
+              store.scanQueue.active != .cachesAndDevTools,
+              !store.isScanQueued(.cachesAndDevTools) else { return }
+        backgroundRefreshTask = Task { @MainActor [weak self] in
+            // The store-scan subscription settles the visible state.
+            await store.scanThroughQueue(.cachesAndDevTools, forced: true)
+            guard let self, !Task.isCancelled else { return }
+            self.backgroundRefreshTask = nil
+        }
+    }
+
+    private func cancelBackgroundRefresh() {
+        backgroundRefreshTask?.cancel()
+        backgroundRefreshTask = nil
+    }
+
+    /// `forced` skips the busy check. `rescan` scans even when this session already
+    /// has results; without it, a scan the window's queue already ran is enough.
+    private func runScan(forced: Bool, rescan: Bool = false) {
+        guard let store else { return }
+        // Block re-scan while checking or cleaning.
+        if case .cleaning = state { return }
+        if store.isDeleting { return }
+        if isBusy, !forced { return }
+
+        launchScanPending = false
+        cancelBackgroundRefresh()
+        activeWorkTask?.cancel()
+        // Only animate a real change. Wrapping the cold `.checking -> .checking`
+        // write in `withAnimation` lets the transaction capture the panel's
+        // first layout pass, which shows as a scale-in from the corner.
+        setState(.checking)
+        activeWorkTask = Task { @MainActor [weak self] in
+            // Through the window's queue, so this never walks the disk beside a
+            // Large Files or apps scan. The store-scan subscription settles the
+            // visible state once the scan actually completes.
+            await store.scanThroughQueue(.cachesAndDevTools, forced: rescan)
+            guard let self, !Task.isCancelled else { return }
+            self.activeWorkTask = nil
+            // When the window's queue already had this session's results, no scan
+            // ran and the subscription never fires, so settle on them here.
+            if case .checking = self.state, !store.isScanningAll,
+               store.hasSessionResults(for: .cachesAndDevTools) {
+                self.resolveAfterScan()
+            }
+        }
+    }
+
+    private func resolveAfterScan(animated: Bool = true) {
+        guard let store else { return }
+        hasSessionScan = true
+        let date = store.lastScanCompletedAt ?? Date()
+        let bytes = store.safeRecoverableBytes
+        setState(
+            bytes > 0 ? .ready(bytes: bytes, lastScanned: date) : .clear(lastScanned: date),
+            animated: animated
+        )
+        if menuScanArmed {
+            menuScanArmed = false
+            // The user asked for this scan from the panel; if they've since
+            // clicked away and the panel is gone, deliver the result anyway.
+            if !isPanelVisible {
+                Task { await MenuScanNotifier.notifyScanResult(readyBytes: bytes) }
+            }
+        }
+        if notificationCleanAwaitsScan {
+            notificationCleanAwaitsScan = false
+            performCleanFromNotification()
+        }
+    }
+
+    /// Cleans via the existing safe-clean entry point. Pins the candidates from
+    /// the current scan so the store does not re-scan, then routes the deletion
+    /// through `performManualSafeCleanNow` (allowlist + trash-by-default).
+    /// Returns whether a clean started.
+    @discardableResult
+    func clean() -> Bool {
+        // The Overview's Clean claims its targets before `isDeleting` turns on, so
+        // check both or the two runs race and one reports 0 bytes.
+        guard let store, case .ready = state, !store.isDeleting,
+              !store.isInteractiveSafeCleanupInProgress else { return false }
+
+        let candidates = store.manualSafeCleanupCandidates()
+        let total = candidates.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        guard total > 0 else {
+            settleOnCleanableBytes()
+            return false
+        }
+
+        cancelBackgroundRefresh()
+        activeWorkTask?.cancel()
+        setState(.cleaning(cleaned: 0, total: total))
+
+        activeWorkTask = Task { @MainActor [weak self] in
+            await self?.runClean(candidates: candidates)
+            self?.activeWorkTask = nil
+        }
+        return true
+    }
+
+    private func runClean(candidates: [PurgeStore.DeletionCandidate]) async {
+        guard let store else { return }
+
+        // The menu says "Moved X of Y to trash", so X must be what the engine has
+        // actually moved. A timed ramp used to fill it before anything moved (#59).
+        let progress = DeletionProgressBuffer()
+        let poller = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                self?.mirrorCleaningProgress(progress.snapshot().bytesMovedToTrash)
+            }
+        }
+
+        let summary = await store.performManualSafeCleanNow(
+            pinnedCandidates: candidates,
+            progressBuffer: progress
+        )
+        poller.cancel()
+        let fromNotification = cleanFromNotification
+        cleanFromNotification = false
+        guard !Task.isCancelled else { return }
+
+        // Nothing moved: no "cleaned" beat and no "Moved 0 KB" notification.
+        // The menu shows what the scan still holds.
+        guard !summary.skippedForAnotherClean, !summary.failed, summary.bytesMovedToTrash > 0 else {
+            settleOnCleanableBytes()
+            return
+        }
+
+        setState(.cleaned(bytes: summary.bytesMovedToTrash))
+        if fromNotification, !isPanelVisible {
+            Task { await MenuScanNotifier.notifyCleaned(bytesMovedToTrash: summary.bytesMovedToTrash) }
+        }
+
+        // Settle on what is left and let the all-time total tick up. Rows that
+        // failed stay in the scan, so "all clear" shows only when nothing safe
+        // is left (#183).
+        try? await Task.sleep(nanoseconds: Self.cleanedDwellNanoseconds)
+        guard !Task.isCancelled else { return }
+        settleOnCleanableBytes()
+    }
+
+    private func mirrorCleaningProgress(_ movedBytes: Int64) {
+        guard case .cleaning(let cleaned, let total) = state else { return }
+        let moved = min(movedBytes, total)
+        guard moved != cleaned else { return }
+        state = .cleaning(cleaned: moved, total: total)
+    }
+}

@@ -1,0 +1,1799 @@
+import AppKit
+import SwiftUI
+
+struct LargeFilesView: View {
+    @EnvironmentObject private var store: PurgeStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    let isLoading: Bool
+    let onScan: () -> Void
+    /// Owned by the parent rather than held as local `@State` so the page header's
+    /// "N files · X GB to review" subtitle — which `ContentView` renders outside this
+    /// view — counts the same rows the list is actually showing. With the query
+    /// private to this view the header kept advertising the full unfiltered scan.
+    @Binding var searchQuery: String
+
+    @AppStorage("sort.largeFiles") private var sortRaw: String = SortOption.sizeDesc.rawValue
+    @AppStorage(LargeFileSizeThreshold.userDefaultsKey) private var minSizeMB: Int = LargeFileSizeThreshold.defaultOption.rawValue
+    @AppStorage(LargeFileAgeThreshold.userDefaultsKey) private var minAgeDays: Int = LargeFileAgeThreshold.defaultOption.rawValue
+
+    /// Bumped when a scan finishes to reset the results List's identity (and thus
+    /// its scroll to the top). Kept out of selection so toggles never reset scroll.
+    @State private var scanGeneration = 0
+
+    /// Mirror of `store.largeFileDuplicates.index`, kept as local state rather
+    /// than by `@ObservedObject`-ing the index object: this view owns the chip
+    /// counts and the filter, so it has to re-render when groups land — but it
+    /// must *not* also re-render on every `isChecking` flip, because a re-render
+    /// of this view reverts the results List's scroll position. The store assigns
+    /// the index exactly once per pass, so this fires exactly once.
+    @State private var duplicateIndex: DuplicateIndex = .empty
+
+    /// Pseudo-category shared with the real category chips via
+    /// `store.largeFileCategoryFilter`, so chip selection stays single-select
+    /// without a second piece of state.
+    private static let duplicatesFilterID = LargeFileCategoryFilter.duplicates
+
+    /// The chip the list filters on and lights. The store holds the one the user
+    /// picked; this is All once that chip has no rows and is no longer drawn, so
+    /// the list never filters on a chip the user can't see (#277).
+    private var activeCategoryFilter: String {
+        LargeFileCategoryFilter.activeRawValue(
+            rawValue: store.largeFileCategoryFilter, files: store.largeFiles, duplicates: duplicateIndex
+        )
+    }
+
+    private var currentSort: SortOption {
+        SortOption(rawValue: sortRaw) ?? .sizeDesc
+    }
+
+    private var sortOptionBinding: Binding<SortOption> {
+        Binding(
+            get: { SortOption(rawValue: sortRaw) ?? .sizeDesc },
+            set: { sortRaw = $0.rawValue }
+        )
+    }
+
+    private var sizeThreshold: LargeFileSizeThreshold {
+        LargeFileSizeThreshold(rawValue: minSizeMB) ?? .defaultOption
+    }
+
+    private var ageThreshold: LargeFileAgeThreshold {
+        LargeFileAgeThreshold(rawValue: minAgeDays) ?? .defaultOption
+    }
+
+    /// Which categories get a chip. Intentionally keyed off the full scan result and
+    /// not the query, so chips don't appear and vanish under the pointer as the user
+    /// types — a chip that reads 0 is steadier than a row that reflows every keystroke.
+    private var availableCategories: [LargeFileCategory] {
+        let present = Set(store.largeFiles.map(\.category))
+        return LargeFileCategory.allCases.filter { present.contains($0) }
+    }
+
+    /// Everything matching the query, before the category chip narrows it further.
+    /// This is what the chip counts are drawn from.
+    private var searchMatches: [LargeFile] {
+        store.largeFiles.filter { $0.matches(searchQuery: searchQuery) }
+    }
+
+    private var hasActiveQuery: Bool {
+        !searchQuery.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// Whether the Duplicates chip is the active filter *and* has something to
+    /// show. The two come apart when the last copies leave the list while the
+    /// chip is selected; `activeCategoryFilter` then reads All.
+    private var isDuplicatesFilterActive: Bool {
+        LargeFileCategoryFilter.isDuplicatesActive(
+            rawValue: activeCategoryFilter, duplicates: duplicateIndex
+        )
+    }
+
+    /// Whether the iCloud chip is on and has files under it (#106). Keep Only in
+    /// iCloud is offered here and nowhere else in the bar, so its meaning is
+    /// plain from where it sits.
+    private var isICloudFilterActive: Bool {
+        LargeFileCategoryFilter.isICloudActive(rawValue: activeCategoryFilter, files: store.largeFiles)
+    }
+
+    /// The synced files matching the search, for the iCloud chip's count.
+    private var iCloudMatches: [LargeFile] {
+        searchMatches.filter(\.canRemoveDownload)
+    }
+
+    /// The groups the list draws as containers, each holding its copies.
+    ///
+    /// The sort menu reorders whole groups here rather than individual rows —
+    /// copies stay together either way, since splitting them up is the thing the
+    /// grouping exists to prevent.
+    private var duplicateSections: [LargeFileCategoryFilter.Section] {
+        let sections = LargeFileCategoryFilter.duplicateSections(
+            in: store.largeFiles, query: searchQuery, duplicates: duplicateIndex
+        )
+        let files = store.largeFiles
+
+        // "Newest"/"Oldest" rank a group by its most recently touched copy: that
+        // is the one that says whether the set is still in use.
+        func lastUsed(_ section: LargeFileCategoryFilter.Section) -> Date {
+            section.memberIndices.map { files[$0].lastUsed }.max() ?? .distantPast
+        }
+        func name(_ section: LargeFileCategoryFilter.Section) -> String {
+            section.memberIndices.first.map { files[$0].displayName } ?? ""
+        }
+
+        switch currentSort {
+        // Sorted on the reclaimable figure the group header shows, not on the
+        // index's own ordering: the two agree today, but only the header's number
+        // is derived from the rows actually rendered.
+        case .sizeDesc:
+            return sections.sorted { $0.displayedReclaimableBytes > $1.displayedReclaimableBytes }
+        case .sizeAsc:
+            return sections.sorted { $0.displayedReclaimableBytes < $1.displayedReclaimableBytes }
+        case .dateNewest: return sections.sorted { lastUsed($0) > lastUsed($1) }
+        case .dateOldest: return sections.sorted { lastUsed($0) < lastUsed($1) }
+        case .nameAZ:
+            return sections.sorted {
+                name($0).localizedCaseInsensitiveCompare(name($1)) == .orderedAscending
+            }
+        }
+    }
+
+    /// Rows in display order. Derived from `visibleIndices` so the two can never
+    /// disagree about what the list is showing.
+    private var visibleFiles: [LargeFile] {
+        let files = store.largeFiles
+        return visibleIndices.map { files[$0] }
+    }
+
+    private var visibleIDs: [String] {
+        visibleFiles.map(\.id)
+    }
+
+    /// Indices into `store.largeFiles` in display (filtered + sorted) order. The
+    /// results List iterates these instead of `visibleFiles` so its ForEach data is
+    /// a plain `[Int]` that stays value-identical when only a row's selection flips
+    /// — that structural stability is what keeps the macOS List from re-scrolling
+    /// to its stuck "current row" on select (matches the App Caches list, which
+    /// iterates `sortedVisibleIndices()`). Iterating fresh `LargeFile` value copies
+    /// instead churns the data every toggle and reintroduces the scroll jump.
+    private var visibleIndices: [Int] {
+        let files = store.largeFiles
+        let filtered = LargeFileCategoryFilter.visibleIndices(
+            in: files, rawValue: activeCategoryFilter, query: searchQuery, duplicates: duplicateIndex
+        )
+
+        // Under the Duplicates chip the rows are laid out group by group, which
+        // the shared filter has already done. The sort menu doesn't apply — the
+        // grouping *is* the order.
+        if isDuplicatesFilterActive { return filtered }
+
+        switch currentSort {
+        case .sizeDesc: return filtered.sorted { files[$0].sizeBytes > files[$1].sizeBytes }
+        case .sizeAsc: return filtered.sorted { files[$0].sizeBytes < files[$1].sizeBytes }
+        case .dateNewest: return filtered.sorted { files[$0].lastUsed > files[$1].lastUsed }
+        case .dateOldest: return filtered.sorted { files[$0].lastUsed < files[$1].lastUsed }
+        case .nameAZ:
+            return filtered.sorted {
+                files[$0].displayName.localizedCaseInsensitiveCompare(files[$1].displayName) == .orderedAscending
+            }
+        }
+    }
+
+    var body: some View {
+        // Controls and the Select All row sit above the list as opaque chrome; the
+        // list cuts off cleanly at its own edge with no scroll-edge blur, matching
+        // the App Uninstaller tab. Every macOS version gets the Select All row:
+        // before macOS 26 it was left out, and with it Select All, the sort menu
+        // and Delete extra copies (#183).
+        VStack(spacing: 0) {
+            if !isAwaitingFirstScan {
+                controlsChrome
+                selectAllRowChrome
+            }
+            listStack
+        }
+        .background(AppColors.surfaceBase)
+        .onReceive(store.largeFileDuplicates.indexPublisher) { index in
+            duplicateIndex = index
+        }
+    }
+
+    /// No scan has finished this session and nothing has streamed in yet: the
+    /// filters, search and Select All have nothing to act on, so the tab shows
+    /// only its status.
+    private var isAwaitingFirstScan: Bool {
+        store.isAwaitingFirstLargeFileScan
+    }
+
+    private var scanWaitStatus: ScanWaitStatus {
+        store.scanWaitStatus(for: .largeFiles, isScanning: isLoading)
+    }
+
+    private var controlsChrome: some View {
+        VStack(alignment: .leading, spacing: AppStyle.Spacing.xSmall) {
+            HStack(spacing: AppStyle.Spacing.xSmall) {
+                thresholdMenu
+                ageMenu
+                Spacer(minLength: AppStyle.Spacing.small)
+                CapsuleSearchField(
+                    query: $searchQuery,
+                    prompt: "Search",
+                    accessibilityLabel: "Search large files by name",
+                    width: 220
+                )
+            }
+            .padding(.horizontal, AppDetailPageLayout.horizontalInset)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: AppStyle.Spacing.xxSmall) {
+                    // Counts are search-filtered but not category-filtered, so the
+                    // chips answer "where did my matches land?" while a query is
+                    // active instead of advertising rows the query already hid.
+                    categoryChip(
+                        id: LargeFileCategoryFilter.all,
+                        title: String(localized: "All"),
+                        systemImage: "square.grid.2x2",
+                        count: searchMatches.count
+                    )
+
+                    // Sits right after "All" rather than among the categories: a
+                    // duplicate cuts across every category, and it's the one chip
+                    // that answers "what here is redundant?".
+                    if !duplicateIndex.isEmpty {
+                        categoryChip(
+                            id: Self.duplicatesFilterID,
+                            title: String(localized: "Duplicates"),
+                            systemImage: "square.on.square",
+                            // The count of *removable* copies — one keeper per
+                            // group excluded — so it answers "what here is
+                            // redundant?" and agrees with the reclaimable bytes
+                            // rather than double-counting the copy worth keeping.
+                            //
+                            // Counted from the sections the list would draw, not
+                            // from the query matches: a query matching one copy
+                            // expands to its whole group, so counting matches
+                            // directly would advertise fewer rows than appear.
+                            count: duplicateSections.reduce(0) { $0 + $1.displayedReclaimableCount },
+                            tier: .checkFirst
+                        )
+                    }
+
+                    // The synced files that also use space here, where Keep Only
+                    // in iCloud lives (#106). Like Duplicates it cuts across every
+                    // category, so it sits with it, before them.
+                    if store.hasRemovableDownloads {
+                        categoryChip(
+                            id: LargeFileCategoryFilter.iCloud,
+                            title: String(localized: "iCloud"),
+                            systemImage: "icloud",
+                            count: iCloudMatches.count
+                        )
+                    }
+
+                    LargeFileDuplicateStatus(duplicates: store.largeFileDuplicates)
+
+                    ForEach(availableCategories) { category in
+                        categoryChip(
+                            id: category.rawValue,
+                            title: category.displayName,
+                            systemImage: category.symbolName,
+                            count: searchMatches.filter { $0.category == category }.count
+                        )
+                    }
+                }
+                .padding(.vertical, AppStyle.Spacing.xxxSmall)
+            }
+            .frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34, alignment: .leading)
+            .padding(.horizontal, AppDetailPageLayout.horizontalInset)
+        }
+    }
+
+    private var thresholdMenu: some View {
+        AppDropdown(
+            options: LargeFileSizeThreshold.allCases,
+            selection: sizeThreshold,
+            optionLabel: { $0.label },
+            onSelect: { option in
+                minSizeMB = option.rawValue
+                onScan()
+            }
+        ) {
+            FilterChip(
+                style: .dropdown,
+                label: sizeThreshold.menuButtonLabel,
+                leadingSystemImage: "arrow.up.forward.circle"
+            )
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .accessibilityLabel("Size filter")
+        .accessibilityValue(sizeThreshold.menuButtonLabel)
+    }
+
+    private var ageMenu: some View {
+        AppDropdown(
+            options: LargeFileAgeThreshold.allCases,
+            selection: ageThreshold,
+            optionLabel: { $0.label },
+            onSelect: { option in
+                minAgeDays = option.rawValue
+                onScan()
+            }
+        ) {
+            FilterChip(
+                style: .dropdown,
+                label: ageThreshold.menuButtonLabel,
+                leadingSystemImage: "calendar"
+            )
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .accessibilityLabel("Last used filter")
+        .accessibilityValue(ageThreshold.menuButtonLabel)
+    }
+
+    private func categoryChip(
+        id: String,
+        title: String,
+        systemImage: String,
+        count: Int,
+        tier: FilterChipTier = .neutral
+    ) -> some View {
+        let isOn = activeCategoryFilter == id
+        return Button {
+            selectCategory(id)
+        } label: {
+            FilterChip(
+                style: .tab,
+                label: title,
+                isSelected: isOn,
+                tier: tier,
+                leadingSystemImage: systemImage,
+                count: count
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isOn ? .isSelected : [])
+    }
+
+    private func selectCategory(_ id: String) {
+        if reduceMotion {
+            store.largeFileCategoryFilter = id
+        } else {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                store.largeFileCategoryFilter = id
+            }
+        }
+    }
+
+    private var selectAllRowChrome: some View {
+        // A child view that observes the selection object, so its tri-state updates
+        // on selection WITHOUT re-rendering LargeFilesView (which would revert the
+        // list scroll). LargeFilesView only reads the stable object reference here.
+        LargeFileSelectAllBar(
+            selection: store.largeFileSelection,
+            visibleIDs: visibleIDs,
+            sort: sortOptionBinding,
+            onToggleAll: toggleSelectAll,
+            onKeepOneOfEach: isDuplicatesFilterActive
+                ? { store.requestDuplicateCleanup(searchQuery: searchQuery) }
+                : nil,
+            onRemoveDownload: isICloudFilterActive
+                ? { store.requestRemoveDownloads() }
+                : nil
+        )
+    }
+
+    private var listStack: some View {
+        ZStack {
+            listOrPlaceholder
+
+            if store.isDeleting && !visibleFiles.isEmpty {
+                CleaningOverlay()
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // The last scan's glass lifts as the first file lands (#283).
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: store.largeFilesLastScan == nil)
+    }
+
+    /// Large Files keeps only its total between launches, never the file list
+    /// (#283), so while it scans again the wait says what it found last time.
+    private var lastScanLine: String? {
+        guard let record = store.applicableRecord(for: .largeFiles), record.count > 0 else { return nil }
+        let size = formatBytes(record.bytes)
+        let age = compactAgoText(from: record.completedAt, to: Date())
+        return record.count == 1
+            ? String(localized: "Last scan found 1 file, \(size), \(age)")
+            : String(localized: "Last scan found \(record.count) files, \(size), \(age)")
+    }
+
+    @ViewBuilder
+    private var listOrPlaceholder: some View {
+        if store.largeFiles.isEmpty {
+            if isAwaitingFirstScan || scanWaitStatus == .scanning {
+                if let lastScan = store.largeFilesLastScan {
+                    LargeFilesLastScanGlass(lastScan: lastScan, status: scanWaitStatus)
+                        .transition(.opacity)
+                } else {
+                    ScanStatusPlaceholder(status: scanWaitStatus, copy: .largeFiles, lastScanLine: lastScanLine)
+                }
+            } else {
+                emptyState
+            }
+        } else if visibleFiles.isEmpty {
+            emptyFilterState
+        } else {
+            resultsList
+        }
+    }
+
+    /// Identity of the results List. Changes on scan completion so fresh results
+    /// start at the top, and *also* when the list switches between flat rows and
+    /// duplicate group containers.
+    ///
+    /// That second term is load-bearing. The swap changes every row's height and
+    /// the total content length under a scroll offset the List otherwise keeps, so
+    /// landing on Duplicates left the first group scrolled up beneath the Select
+    /// All bar with the soft scroll-edge material missing — a flat dark band
+    /// instead of the translucent one every other tab shows. Switching to another
+    /// chip and back "fixed" it only because that rebuilt the rows by hand. A
+    /// fresh identity does it properly, on the transition itself.
+    private var resultsListIdentity: String {
+        "\(scanGeneration)-\(isDuplicatesFilterActive ? "grouped" : "flat")"
+    }
+
+    private var resultsList: some View {
+        // No ScrollViewReader/ScrollPosition binding: both revert the scroll to a
+        // stale committed offset on the first re-render after a wheel/trackpad
+        // scroll (verified by logging). We reset the List identity only when a scan
+        // finishes so fresh results start at the top, and leave scroll alone on
+        // every selection.
+        resultsListContent
+            .id(resultsListIdentity)
+            .onChange(of: isLoading) { loading in
+                guard !loading else { return }
+                scanGeneration &+= 1
+            }
+    }
+
+    private var resultsListContent: some View {
+        List {
+            if isDuplicatesFilterActive {
+                // One List row per *group*: the copies live inside the container,
+                // so a set of duplicates reads as one thing. Iterating group ids
+                // ([String]) keeps the same property that `[Int]` indices give the
+                // flat list — the ForEach data is value-identical across selection
+                // toggles, so the List doesn't churn and revert its scroll.
+                ForEach(duplicateSections, id: \.groupID) { section in
+                    DuplicateGroupCard(
+                        section: section,
+                        files: store.largeFiles,
+                        selection: store.largeFileSelection,
+                        onToggle: toggleSelection(forFileID:),
+                        onExclude: store.excludeLargeFileFromScans,
+                        onExcludeFolder: store.excludeLargeFileFolderFromScans
+                    )
+                    .listRowInsets(ScanListRowInsets.standard)
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .transition(reduceMotion ? .opacity : .scanRowInsertion)
+                }
+            } else {
+                // Iterate stable `[Int]` indices (not fresh LargeFile copies) so the
+                // ForEach data doesn't churn on selection and the List stays put —
+                // see `visibleIndices`.
+                ForEach(visibleIndices, id: \.self) { index in
+                    let file = store.largeFiles[index]
+                    LargeFileRow(
+                        file: file,
+                        selection: store.largeFileSelection,
+                        duplicateCopyCount: duplicateIndex.copyCount(forFileID: file.id),
+                        onToggle: { toggleSelection(forFileID: file.id) },
+                        onExclude: { store.excludeLargeFileFromScans(file) },
+                        onExcludeFolder: { store.excludeLargeFileFolderFromScans(file) },
+                        onRemoveDownload: { store.requestRemoveDownloads(for: file) }
+                    )
+                    .listRowInsets(ScanListRowInsets.standard)
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .transition(reduceMotion ? .opacity : .scanRowInsertion)
+                }
+            }
+
+            // A folder the scan couldn't read still gets its warning under the
+            // rows: without it a partial list looks complete.
+            if let summary = store.largeFileScanSummary, !summary.unreadableRoots.isEmpty {
+                LargeFileScanSummaryCard(summary: summary, includesCloud: false)
+                    .padding(.top, AppStyle.Spacing.xSmall)
+                    .listRowInsets(ScanListRowInsets.standard)
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+            }
+
+            ScanListBottomSpacer()
+        }
+        .listStyle(.plain)
+        .environment(\.defaultMinListRowHeight, 0)
+        // On macOS, List rows are natively selectable even with no `selection:`
+        // binding: the first click engages NSTableView selection/focus and it
+        // scroll-to-visibles the clicked row (worse here than the scan tabs
+        // because these rows are taller). We drive selection ourselves via the
+        // row's `.onTapGesture`, so disable the List's own selection to stop it.
+        .disablingListSelection()
+        .scrollContentBackground(.hidden)
+        .background(AppColors.surfaceBase)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: store.largeFilesRevision)
+    }
+
+    /// The card under the empty-state heading is this wide: enough for a legend
+    /// row with a button, narrower than the list so it reads as a summary and not
+    /// as a row.
+    private static let summaryCardWidth: CGFloat = 540
+
+    /// The next size filter down from the current one, for the "Try 50 MB"
+    /// button. Nil at the lowest step, where the button is left out.
+    private var lowerSizeThreshold: LargeFileSizeThreshold? {
+        LargeFileSizeThreshold.allCases.last { $0.rawValue < sizeThreshold.rawValue }
+    }
+
+    private func tryLowerThreshold() {
+        guard let lower = lowerSizeThreshold else { return }
+        minSizeMB = lower.rawValue
+        onScan()
+    }
+
+    /// An empty list after a finished scan says why, in a card with a row per
+    /// place the files went (#230). Before any scan has finished there is no
+    /// summary, so the old hint stands in.
+    private var emptyState: some View {
+        let summary = store.largeFileScanSummary
+        let state = LargeFileEmptyState.resolve(summary)
+        // Centred while it fits, scrollable once the card grows a row per
+        // provider, library and unreadable folder past the window's height.
+        return GeometryReader { geometry in
+            ScrollView {
+                VStack(spacing: AppStyle.Spacing.medium) {
+                    VStack(spacing: AppStyle.Spacing.small) {
+                        Image(systemName: state.symbol)
+                            .font(.system(size: 38))
+                            .foregroundStyle(state.symbolColor)
+                        Text(state.title)
+                            .font(AppStyle.Typography.sectionTitle.weight(.regular))
+                        if summary == nil {
+                            Text("Try a lower size threshold or a shorter last-used window.")
+                                .foregroundStyle(AppColors.textSecondary)
+                        } else if let lower = lowerSizeThreshold {
+                            Button(action: tryLowerThreshold) {
+                                Text(
+                                    figures: String(localized: "Try \(lower.label)"),
+                                    style: AppStyle.Typography.callout.weight(.semibold)
+                                )
+                            }
+                            .buttonStyle(.purge(.secondary, size: .small))
+                        }
+                    }
+                    if let summary, LargeFileScanSummaryCard.hasRows(summary) {
+                        LargeFileScanSummaryCard(summary: summary)
+                            .frame(width: Self.summaryCardWidth)
+                    }
+                }
+                .padding(.vertical, AppStyle.Spacing.large)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: geometry.size.height)
+            }
+        }
+    }
+
+    private var emptyFilterState: some View {
+        VStack(spacing: AppStyle.Spacing.xxSmall) {
+            Text("Nothing here.")
+                .font(AppStyle.Typography.headline)
+            // Name the query when there is one: with a search field in the chrome the
+            // generic "this filter" leaves the user guessing whether it was the query,
+            // the category, or the size threshold that emptied the list.
+            if hasActiveQuery {
+                Text("No files match \"\(searchQuery)\".")
+                    .foregroundStyle(AppColors.textSecondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .multilineTextAlignment(.center)
+                Button("Clear Search") {
+                    searchQuery = ""
+                }
+                .buttonStyle(.purge(.secondary, size: .small))
+                .padding(.top, AppStyle.Spacing.xxSmall)
+            } else {
+                Text("No files match this filter.")
+                    .foregroundStyle(AppColors.textSecondary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, AppStyle.Spacing.large)
+    }
+
+    private func toggleSelection(forFileID id: String) {
+        store.setLargeFileSelected(
+            id: id,
+            isSelected: !store.largeFileSelection.ids.contains(id)
+        )
+    }
+
+    private func toggleSelectAll() {
+        let ids = visibleIDs
+        guard !ids.isEmpty else { return }
+        let selected = store.largeFileSelection.ids
+        let allOn = ids.allSatisfy { selected.contains($0) }
+        store.setAllLargeFilesSelected(!allOn, ids: ids)
+    }
+
+}
+
+private extension View {
+    /// Disables the List's own row selection (macOS 14+); a no-op on older systems.
+    /// We manage selection via each row's tap gesture, so the List must not also
+    /// select-and-scroll the clicked row.
+    @ViewBuilder
+    func disablingListSelection() -> some View {
+        if #available(macOS 14.0, *) {
+            selectionDisabled()
+        } else {
+            self
+        }
+    }
+}
+
+/// Keep Only in iCloud for the selected synced files (#106). It sits beside
+/// Select All under the iCloud chip only, where every row is a synced file, so
+/// it never reads as a second way to delete. Its own view observing the
+/// selection, so a tick never re-renders the List.
+private struct LargeFileRemoveDownloadButton: View {
+    @EnvironmentObject private var store: PurgeStore
+    @ObservedObject var selection: LargeFileSelection
+    let action: () -> Void
+
+    var body: some View {
+        let files = store.selectedRemovableDownloads
+        Button(action: action) {
+            // The same label as Delete Selected, so the size uses the rounded
+            // number font and counts the way that one does.
+            AnimatedDeleteActionLabel(
+                inactiveTitle: String(localized: "Keep Only in iCloud"),
+                activeTitle: String(localized: "Keep Only in iCloud"),
+                selectedCount: files.count,
+                selectedBytes: files.reduce(Int64(0)) { $0 + $1.sizeBytes },
+                systemImage: "icloud"
+            )
+        }
+        .buttonStyle(.purge(.secondary))
+        .fixedSize()
+        .disabled(files.isEmpty || store.isDeleting)
+        .help("Free the space on this Mac and keep the selected files in iCloud Drive")
+    }
+}
+
+/// "Checking for duplicates…" status that sits at the end of the chips row while
+/// the hashing pass runs.
+///
+/// Its own view, observing the index object directly, so the flag flipping on and
+/// off doesn't re-render `LargeFilesView` — which would revert the results List's
+/// scroll position for a purely cosmetic status change.
+private struct LargeFileDuplicateStatus: View {
+    @ObservedObject var duplicates: LargeFileDuplicateIndex
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Group {
+            if duplicates.isChecking {
+                HStack(spacing: AppStyle.Spacing.xxSmallPlus) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.7)
+                        .frame(width: 12, height: 12)
+                    Text("Checking for duplicates…")
+                        .font(AppStyle.Typography.callout)
+                        .foregroundStyle(AppColors.textTertiary)
+                        .lineLimit(1)
+                }
+                .padding(.leading, AppStyle.Spacing.xxSmall)
+                .transition(.opacity)
+                .accessibilityElement(children: .combine)
+            }
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: duplicates.isChecking)
+    }
+}
+
+/// Select-all bar extracted from LargeFilesView so its tri-state can observe the
+/// selection object directly — updating on selection without re-rendering (and thus
+/// scroll-reverting) the results List.
+private struct LargeFileSelectAllBar: View {
+    @ObservedObject var selection: LargeFileSelection
+    let visibleIDs: [String]
+    @Binding var sort: SortOption
+    let onToggleAll: () -> Void
+    /// Shown only under the Duplicates filter: selects every copy but one per group
+    /// and opens the delete confirmation. nil elsewhere.
+    var onKeepOneOfEach: (() -> Void)?
+    /// Shown when the scan found a file whose iCloud download can be removed
+    /// (#106). nil otherwise, so a Mac without iCloud Drive never sees it.
+    var onRemoveDownload: (() -> Void)?
+
+    private var state: SelectAllTriState {
+        guard !visibleIDs.isEmpty else { return .none }
+        let selected = visibleIDs.filter { selection.ids.contains($0) }.count
+        if selected == 0 { return .none }
+        if selected == visibleIDs.count { return .all }
+        return .mixed
+    }
+
+    var body: some View {
+        HStack(alignment: .bottom) {
+            TriStateCheckbox(title: String(localized: "Select All"), state: state) {
+                onToggleAll()
+            }
+            .fixedSize()
+            .disabled(visibleIDs.isEmpty)
+
+            Spacer()
+
+            if let onRemoveDownload {
+                LargeFileRemoveDownloadButton(selection: selection, action: onRemoveDownload)
+            }
+
+            if let onKeepOneOfEach {
+                // Sits with the sort control, not beside "Select All": both are
+                // PurgeButtonStyle pills, so grouping them keeps the pill controls on
+                // one baseline instead of one pill riding proud of the plain-text
+                // checkbox. A real Button is fine here — the bar is above the List,
+                // not inside it, so it can't trigger the scroll-to-clicked-row jump
+                // the rows guard against.
+                Button(action: onKeepOneOfEach) {
+                    Label("Delete extra copies", systemImage: "trash")
+                        .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(.purge(.secondary))
+                .fixedSize()
+                .help("Keep one copy of each set and review the rest before deleting")
+            }
+
+            // Always present, even under Duplicates where it reorders whole groups
+            // rather than rows, so the bar keeps a stable height across filters.
+            AppSortMenu(selection: $sort)
+        }
+        .scanTabSelectAllRowLayout()
+    }
+}
+
+/// Search field for the Large Files controls row. Deliberately hand-built rather
+/// than `.searchable`: that modifier hangs its field off the enclosing navigation
+/// chrome, which would put it outside this view entirely and give it a different
+/// look on each of the two containers `LargeFilesView` renders into. Geometry and
+/// tokens here are copied from `FilterChip` so it reads as one control family with
+/// the size and last-used menus sitting beside it.
+/// One duplicate group drawn as a container holding its copies.
+///
+/// This is a single List row, not a Section: the copies are the *contents* of one
+/// box, and letting the List lay them out as siblings is what made a set of
+/// duplicates read as unrelated files in the first place. It also keeps the
+/// height arithmetic exact — see `height`.
+private struct DuplicateGroupCard: View {
+    /// Carries the group and its rendered members together, so the header's copy
+    /// count and reclaimable figure are derived from the rows below it rather
+    /// than from the index, which can briefly disagree.
+    let section: LargeFileCategoryFilter.Section
+    let files: [LargeFile]
+    /// Observed by the child rows, not here — the container itself must not
+    /// re-render on selection.
+    let selection: LargeFileSelection
+    let onToggle: (String) -> Void
+    let onExclude: (LargeFile) -> Void
+    let onExcludeFolder: (LargeFile) -> Void
+
+    private static let headerHeight: CGFloat = 20
+    private static let innerSpacing: CGFloat = AppStyle.Spacing.xxSmallPlus
+    private static let padding: CGFloat = AppStyle.Spacing.small
+
+    /// Explicit, because the macOS List estimating this row's height is what
+    /// makes a click scroll the list — the estimate/actual drift accumulates over
+    /// the rows above. Every term is a fixed constant, so the sum is exact.
+    private var height: CGFloat {
+        let rows = CGFloat(section.displayedCopyCount)
+        return Self.padding * 2
+            + Self.headerHeight
+            + Self.innerSpacing
+            + rows * LargeFileRow.contentHeight
+            + max(rows - 1, 0) * Self.innerSpacing
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Self.innerSpacing) {
+            header
+
+            ForEach(section.memberIndices, id: \.self) { index in
+                let file = files[index]
+                LargeFileRow(
+                    file: file,
+                    selection: selection,
+                    // No badge inside the box: the container header already says
+                    // how many copies there are, and repeating it on every card
+                    // is noise.
+                    duplicateCopyCount: nil,
+                    isNested: true,
+                    onToggle: { onToggle(file.id) },
+                    onExclude: { onExclude(file) },
+                    onExcludeFolder: { onExcludeFolder(file) }
+                )
+            }
+        }
+        .padding(Self.padding)
+        .frame(height: height)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: AppStyle.Radius.lg, style: .continuous)
+                .fill(AppColors.fillSecondary)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: AppStyle.Radius.lg, style: .continuous)
+                .strokeBorder(AppColors.borderSubtle, lineWidth: 1)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(section.displayedCopyCount) identical copies")
+    }
+
+    private var header: some View {
+        HStack(spacing: AppStyle.Spacing.xxSmallPlus) {
+            // Same colour as the title beside it: this marks the card as a group,
+            // it isn't a warning, so it shouldn't pull the eye the way the yellow
+            // check tint did.
+            Image(systemName: "square.on.square")
+                .imageScale(.small)
+                .foregroundStyle(AppColors.textSecondary)
+                .accessibilityHidden(true)
+
+            // No size here. Every copy is the same size and each row already shows
+            // it, so a "9.4 MB each" and a "free 9.4 MB" on the header just repeated
+            // the one number the rows carry — three sizes for a two-copy set.
+            Text("\(section.displayedCopyCount) identical copies")
+                .foregroundStyle(AppColors.textSecondary)
+
+            Spacer(minLength: 0)
+        }
+        .font(AppStyle.Typography.metadataEmphasis)
+        .lineLimit(1)
+        .frame(height: Self.headerHeight)
+        .padding(.horizontal, AppStyle.Spacing.xxSmall)
+    }
+}
+
+/// Large Files while it waits for its scan, with a saved last scan (#283): the
+/// page as it was, faded. The chips carry the last scan's counts and the
+/// rows keep the exact shape of real ones, without names, since Large Files never
+/// saves them. The first file to land replaces it with the list.
+private struct LargeFilesLastScanGlass: View {
+    let lastScan: LargeFilesLastScan
+    let status: ScanWaitStatus
+
+    /// Title widths for the nameless rows, so they read as a list, not a pattern.
+    private static let titleWidths: [CGFloat] = [190, 150, 220, 170, 200, 140, 180, 160]
+
+    /// Enough rows to fill the page, never more than the scan found.
+    private var rowCount: Int { min(lastScan.count, Self.titleWidths.count) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppStyle.Spacing.small) {
+            chips
+            ZStack {
+                rows
+                glass
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .padding(.top, AppStyle.Spacing.xSmall)
+    }
+
+    /// The last scan's chips, to look at: there is nothing to filter until files land.
+    private var chips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: AppStyle.Spacing.xxSmall) {
+                FilterChip(
+                    style: .tab,
+                    label: String(localized: "All"),
+                    isSelected: true,
+                    leadingSystemImage: "square.grid.2x2",
+                    count: lastScan.count
+                )
+                ForEach(lastScan.kinds, id: \.category) { kind in
+                    FilterChip(
+                        style: .tab,
+                        label: kind.category.displayName,
+                        leadingSystemImage: kind.category.symbolName,
+                        count: kind.count
+                    )
+                }
+            }
+            .padding(.vertical, AppStyle.Spacing.xxxSmall)
+        }
+        .frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34, alignment: .leading)
+        .padding(.horizontal, AppDetailPageLayout.horizontalInset)
+        .opacity(0.55)
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var rows: some View {
+        VStack(spacing: AppStyle.Spacing.xxSmallPlus) {
+            ForEach(0..<rowCount, id: \.self) { index in
+                LargeFileSkeletonRow(titleWidth: Self.titleWidths[index])
+            }
+        }
+        .padding(.horizontal, AppDetailPageLayout.horizontalInset)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .opacity(0.4)
+        .accessibilityHidden(true)
+    }
+
+    /// The rows fade into the page itself, not under a material: a material
+    /// lightens what it covers, so the page read a shade lighter than the header
+    /// above it.
+    private var glass: some View {
+        capsule
+            .accessibilityElement(children: .combine)
+    }
+
+    private var capsule: some View {
+        HStack(spacing: AppStyle.Spacing.small) {
+            icon
+                .frame(width: 24, height: 24)
+            VStack(alignment: .leading, spacing: AppStyle.Spacing.xxxSmall) {
+                Text(title)
+                    .font(AppStyle.Typography.headline)
+                Text(subtitle)
+                    .font(AppStyle.Typography.metadata.numbers)
+                    .foregroundStyle(AppColors.textSecondary)
+            }
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+        }
+        .padding(.vertical, AppStyle.Spacing.small)
+        .padding(.leading, AppStyle.Spacing.small)
+        .padding(.trailing, AppStyle.Spacing.large)
+        .background(Capsule(style: .continuous).fill(AppColors.surfaceRaised))
+        .overlay(Capsule(style: .continuous).strokeBorder(AppColors.borderStrong, lineWidth: 0.5))
+    }
+
+    @ViewBuilder
+    private var icon: some View {
+        switch status {
+        case .scanning, .waiting:
+            ProgressView()
+                .controlSize(.small)
+        case .notScanned:
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(AppColors.textTertiary)
+        }
+    }
+
+    private var title: String {
+        switch status {
+        case .scanning:
+            return String(localized: "Looking for large files again")
+        case .waiting(let behind):
+            guard let behind, behind != .largeFiles else { return String(localized: "Starting…") }
+            return String(localized: "Up next, after \(behind.displayName)")
+        case .notScanned:
+            return String(localized: "Use Scan to look again")
+        }
+    }
+
+    private var subtitle: String {
+        let size = formatBytes(lastScan.bytes)
+        let age = compactAgoText(from: lastScan.scannedAt, to: Date())
+        return lastScan.count == 1
+            ? String(localized: "Last scan: 1 file, \(size), \(age)")
+            : String(localized: "Last scan: \(lastScan.count) files, \(size), \(age)")
+    }
+}
+
+/// A Large Files row with no file in it: the same card, checkbox, thumbnail and
+/// size slots at the same height, so the list that replaces it doesn't move.
+private struct LargeFileSkeletonRow: View {
+    let titleWidth: CGFloat
+
+    var body: some View {
+        HStack(alignment: .center, spacing: AppStyle.Spacing.small) {
+            RoundedRectangle(cornerRadius: AppStyle.Radius.xs, style: .continuous)
+                .stroke(AppColors.textSecondary.opacity(SkeletonOpacity.medium), lineWidth: 1)
+                .frame(width: 14, height: 14)
+            RoundedRectangle(cornerRadius: AppStyle.Radius.sm, style: .continuous)
+                .fill(AppColors.textSecondary.opacity(SkeletonOpacity.medium))
+                .frame(width: AppStyle.Row.listIconFrameSize, height: AppStyle.Row.listIconFrameSize)
+            VStack(alignment: .leading, spacing: AppStyle.Spacing.xxSmallPlus) {
+                SkeletonBar(width: titleWidth, height: 10)
+                SkeletonBar(width: titleWidth * 0.6, height: 8)
+            }
+            Spacer(minLength: AppStyle.Spacing.small)
+            SkeletonBar(width: 56, height: 10)
+        }
+        .padding(.horizontal, AppStyle.Row.scanCardHorizontalPadding)
+        .frame(height: LargeFileRow.contentHeight)
+        .modifier(ScanRowCardChrome())
+        .shimmering()
+    }
+}
+
+private struct LargeFileRow: View {
+    let file: LargeFile
+    /// Observed so a toggle re-renders only the (visible) rows — not the List
+    /// container, whose re-render is what reverts the scroll position.
+    @ObservedObject var selection: LargeFileSelection
+    /// How many byte-identical copies of this file the scan found, nil when it
+    /// isn't part of a duplicate group. Passed as a plain value rather than by
+    /// observing the index object: it only changes when the whole index does, and
+    /// `LargeFilesView` already re-renders for that.
+    let duplicateCopyCount: Int?
+    /// Set when the row sits inside a `DuplicateGroupCard`. The card already
+    /// supplies a raised surface, so the row needs its own outline to stay
+    /// legible as a distinct item rather than dissolving into the container.
+    var isNested: Bool = false
+    let onToggle: () -> Void
+    let onExclude: () -> Void
+    let onExcludeFolder: () -> Void
+    /// Opens Remove Download for this file alone. Only offered when the scan
+    /// found its download removable (#106).
+    var onRemoveDownload: (() -> Void)?
+
+    @State private var isContextMenuActive = false
+
+    private var isSelected: Bool { selection.ids.contains(file.id) }
+
+    /// The folder option only makes sense for a file the user can see in Finder.
+    /// An AI model row stands for a manifest plus blobs in a store the user never
+    /// browses, so excluding "its folder" would mean excluding every model.
+    private var canExcludeFolder: Bool { file.sourceLabel == nil }
+
+    private var folderName: String {
+        file.path.deletingLastPathComponent().lastPathComponent
+    }
+
+    /// Built on right-click, not during `body` — see `ScanRowContextMenu.entries`.
+    private func contextMenuEntries() -> [ScanRowMenuEntry] {
+        var entries: [ScanRowMenuEntry] = []
+        if file.canRemoveDownload, let onRemoveDownload {
+            entries.append(.action(title: String(localized: "Keep Only in iCloud…"), handler: onRemoveDownload))
+            entries.append(.separator)
+        }
+        entries.append(.action(title: String(localized: "Exclude from scans"), handler: onExclude))
+        if canExcludeFolder {
+            entries.append(.action(title: String(localized: "Exclude folder \u{201C}\(folderName)\u{201D} from scans"), handler: onExcludeFolder))
+        }
+        entries.append(.separator)
+        entries.append(contentsOf: FinderReveal.menuEntries(for: [ScanRowLocation(url: fileURL)]))
+        return entries
+    }
+
+    /// Copies *other than this row*. The row is itself one of the group's members,
+    /// so a badge carrying the group total reads as "and this many more elsewhere"
+    /// and overstates by one (issue #29). Nil for a group of one, which the index
+    /// never produces but the arithmetic shouldn't assume.
+    private var otherCopyCount: Int? {
+        guard let duplicateCopyCount, duplicateCopyCount > 1 else { return nil }
+        return duplicateCopyCount - 1
+    }
+
+    /// Fixed, uniform row height so the macOS List never has to *estimate* a row's
+    /// height. Estimated-vs-actual drift is what makes a click scroll the list: the
+    /// error accumulates over the off-screen rows above, so a click near the top
+    /// barely moves while a click far down jumps by the whole accumulated drift
+    /// (enough to throw the row out of view). Derived from the row's own font
+    /// metrics + vertical padding so it matches the natural height without clipping.
+    static let contentHeight: CGFloat = {
+        let textBlock = ScanResultRow.headlineOneLineHeight + 4 + ScanResultRow.subheadlineOneLineHeight
+        return max(AppStyle.Row.listIconFrameSize, textBlock) + 24
+    }()
+    @State private var isHoveringLocation = false
+
+    private var dateText: String {
+        relativeDateText(for: file.lastUsed, referenceDate: Date())
+    }
+
+    private var parentFolderPath: String {
+        file.path.deletingLastPathComponent().path
+    }
+
+    private var fileURL: URL {
+        file.path.standardizedFileURL
+    }
+
+    private func revealInFinder() {
+        NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+    }
+
+    private func quickLook() {
+        QuickLookPreview.show(url: fileURL)
+    }
+
+    var body: some View {
+        // The WHOLE row is one tap target (not a Button, not per-subview): a Button
+        // or interactive control in a macOS List row makes the List scroll the
+        // clicked row into view. Just as bad, any area NOT covered by a gesture
+        // (checkbox, spacer, size label) falls through to the List's own native
+        // row selection, which also scrolls the row in — so the tap must blanket
+        // the entire row. The thumbnail/location gestures inside rowMainContent
+        // still win at their own hit points.
+        HStack(alignment: .center, spacing: AppStyle.Spacing.small) {
+            checkboxVisual
+
+            rowMainContent
+
+            Spacer(minLength: AppStyle.Spacing.small)
+
+            Text(file.formattedSize)
+                .font(AppStyle.Typography.metadata.weight(.medium).numbers)
+                .foregroundStyle(AppColors.textPrimary)
+                .monospacedDigit()
+        }
+        .padding(.horizontal, AppStyle.Row.scanCardHorizontalPadding)
+        .frame(height: Self.contentHeight)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onToggle()
+        }
+        .modifier(ScanRowCardChrome(showsContextMenuHighlight: isContextMenuActive))
+        .overlay {
+            if isNested {
+                RoundedRectangle(cornerRadius: AppStyle.Radius.lg, style: .continuous)
+                    .strokeBorder(AppColors.borderSubtle, lineWidth: 1)
+            }
+        }
+        // Same right-click overlay the other scan rows use, rather than SwiftUI's
+        // `.contextMenu`, which makes the List paint its blue row highlight.
+        .overlay {
+            ScanRowContextMenu(isMenuActive: $isContextMenuActive, entries: contextMenuEntries)
+        }
+        .animation(.easeOut(duration: 0.12), value: isContextMenuActive)
+        .accessibilityValue(isSelected ? "Selected" : "Not selected")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityAction {
+            onToggle()
+        }
+        // The overlay only answers a secondary click; these give VoiceOver and the
+        // keyboard the same exclusion actions. Show in Finder already has one on
+        // the location label.
+        .accessibilityAction(named: Text("Exclude from scans"), onExclude)
+        .modifier(ExcludeFolderAccessibilityAction(isAvailable: canExcludeFolder, handler: onExcludeFolder))
+    }
+
+    /// Non-interactive checkbox that only reflects selection state, so the whole
+    /// row is a single tap target and the checkmark fills on the same frame as
+    /// the tap (no competing hit target, no visible in-between state). An
+    /// interactive Toggle here routes clicks through AppKit's control path, which
+    /// scrolls the clicked row into view and shifts the whole list on select.
+    private var checkboxVisual: some View {
+        Toggle("", isOn: .constant(isSelected))
+            .labelsHidden()
+            .toggleStyle(.checkbox)
+            .tint(AppColors.actionPrimary)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+
+    private var rowMainContent: some View {
+        HStack(alignment: .center, spacing: AppStyle.Spacing.small) {
+            // Tap gesture rather than a Button: a Button in a macOS List row makes
+            // the List scroll the clicked row into view on click, shifting the list.
+            LargeFileThumbnailIcon(file: file)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: quickLook)
+                .modifier(PointingHandOnHover())
+                .help("Quick Look")
+                .accessibilityLabel("Quick Look \(file.displayName)")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction(.default, quickLook)
+
+            VStack(alignment: .leading, spacing: AppStyle.Spacing.xxSmall) {
+                Text(file.displayName)
+                    .font(AppStyle.Typography.headline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                HStack(spacing: AppStyle.Spacing.xxSmallPlus) {
+                    Text(file.locationLabel)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .underline(isHoveringLocation)
+                        .foregroundStyle(AppColors.textSecondary)
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: revealInFinder)
+                        .onHover { isHoveringLocation = $0 }
+                        .help("Show in Finder\n\(parentFolderPath)")
+                        .accessibilityLabel("Reveal in Finder, \(file.locationLabel)")
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityAction(.default, revealInFinder)
+
+                    if file.syncsWithICloud {
+                        LargeFileICloudMark()
+                    }
+
+                    Text("·")
+                        .foregroundStyle(AppColors.textSecondary)
+                    Text("Last used \(dateText)")
+                        .foregroundStyle(AppColors.textSecondary)
+                        .layoutPriority(-1)
+
+                    // A label, not a safety tier, so the plain grey tone. The
+                    // full explanation is the tooltip; the row keeps its height.
+                    if let kind = file.kind {
+                        AppBadge(text: kind.badgeText, tone: .accent)
+                            .fixedSize()
+                            .help(kind.explanation)
+                            .accessibilityLabel(Text(kind.badgeText + ". " + kind.explanation))
+                    }
+
+                    if let otherCopyCount {
+                        AppBadge(text: String(localized: "\(otherCopyCount) other copies"), tone: .warning)
+                            .fixedSize()
+                            .help("\(otherCopyCount + 1) files in this scan have identical contents, including this one.")
+                            .accessibilityLabel("\(otherCopyCount) other identical copies found")
+                    }
+                }
+                .font(AppStyle.Typography.metadata)
+                .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct ExcludeFolderAccessibilityAction: ViewModifier {
+    let isAvailable: Bool
+    let handler: () -> Void
+
+    func body(content: Content) -> some View {
+        if isAvailable {
+            content.accessibilityAction(named: Text("Exclude folder from scans"), handler)
+        } else {
+            content
+        }
+    }
+}
+
+/// Leading icon for a Large File row: a QuickLook thumbnail when one can be generated,
+/// otherwise the category icon with a small extension badge. The fallback renders immediately so
+/// scrolling never blocks; the thumbnail loads off the main thread and fades in once ready, and
+/// `.task` cancels in-flight generation when the row scrolls off-screen.
+/// Shows the pointing hand over the view. A row the List rebuilds while the
+/// pointer is on it never gets its hover-out, so a bare push and pop left the
+/// hand on screen everywhere (#183). This pops on the way out too, and pushes
+/// at most once, as the Overview rows do.
+private struct PointingHandOnHover: ViewModifier {
+    @State private var isHovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .onHover(perform: setHovering)
+            .onDisappear { setHovering(false) }
+    }
+
+    private func setHovering(_ hovering: Bool) {
+        guard hovering != isHovering else { return }
+        isHovering = hovering
+        if hovering {
+            NSCursor.pointingHand.push()
+        } else {
+            NSCursor.pop()
+        }
+    }
+}
+
+private struct LargeFileThumbnailIcon: View {
+    let file: LargeFile
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.displayScale) private var displayScale
+
+    @State private var thumbnail: NSImage?
+
+    private let slotSize = AppStyle.Row.listIconFrameSize
+    private let cornerRadius: CGFloat = AppStyle.Radius.sm
+
+    private var cacheKey: String {
+        LargeFileThumbnailService.cacheKey(path: file.id, modified: file.lastUsed)
+    }
+
+    /// Empty for a row the scanner named itself: a model folder like
+    /// `models--mlx-community--Llama-3.2-3B` has no extension, only a dot in
+    /// its name, and a `.2-3B…` label over the icon would be nonsense.
+    private var fileExtension: String {
+        file.displayNameOverride == nil ? file.path.pathExtension.lowercased() : ""
+    }
+
+    var body: some View {
+        ZStack {
+            fallbackIcon
+                .opacity(thumbnail == nil ? 1 : 0)
+
+            if let thumbnail {
+                Image(nsImage: thumbnail)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: slotSize, height: slotSize)
+                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .strokeBorder(AppColors.borderSubtle, lineWidth: 0.5)
+                    }
+                    .transition(.opacity)
+            }
+        }
+        .frame(width: slotSize, height: slotSize)
+        .task(id: cacheKey) {
+            await loadThumbnail()
+        }
+    }
+
+    private var fallbackIcon: some View {
+        AdaptiveBrandIconImage(source: .sfSymbol(file.category.symbolName))
+            .overlay(alignment: .bottomTrailing) {
+                extensionBadge
+            }
+    }
+
+    /// The label sits over the icon and must stay inside it, or a long extension
+    /// (`.mlmodelc`, `.crdownload`) spills onto the checkbox. Four characters
+    /// fit; anything longer is cut short.
+    private var extensionLabel: String {
+        fileExtension.count > 4 ? ".\(fileExtension.prefix(3))…" : ".\(fileExtension)"
+    }
+
+    @ViewBuilder
+    private var extensionBadge: some View {
+        if !fileExtension.isEmpty {
+            Text(verbatim: extensionLabel)
+                .font(AppStyle.Typography.iconLabel)
+                .lineLimit(1)
+                // A wide glyph run (`.www…`) shrinks a little rather than spill.
+                .minimumScaleFactor(0.8)
+                .foregroundStyle(AppColors.textSecondary)
+                .padding(.horizontal, AppStyle.Spacing.xxSmall)
+                .padding(.vertical, AppStyle.Spacing.xxxSmall)
+                .background(Capsule(style: .continuous).fill(.regularMaterial))
+                .overlay(Capsule(style: .continuous).strokeBorder(AppColors.borderSubtle, lineWidth: 0.5))
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: slotSize, alignment: .trailing)
+        }
+    }
+
+    private func loadThumbnail() async {
+        let key = cacheKey
+
+        if let cached = LargeFileThumbnailService.shared.cachedThumbnail(forKey: key) {
+            thumbnail = cached
+            return
+        }
+
+        let scale = displayScale > 0 ? displayScale : 2
+        let image = await LargeFileThumbnailService.shared.thumbnail(
+            for: file.path.standardizedFileURL,
+            key: key,
+            pointSize: slotSize,
+            scale: scale
+        )
+
+        guard !Task.isCancelled, let image else { return }
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
+            thumbnail = image
+        }
+    }
+}
+
+struct LargeFileDeletionConfirmSheet: View {
+    let files: [LargeFile]
+    /// Duplicate groups the selection would erase entirely. Purge never picks
+    /// which copy survives — issue #17 is explicit that this is the user's call —
+    /// so this only states plainly what the current selection does.
+    var fullyConsumedDuplicateGroups: [DuplicateGroup] = []
+    let onCancel: () -> Void
+    let onConfirm: () -> Void
+
+    private var totalBytes: Int64 {
+        files.reduce(Int64(0)) { $0 + $1.sizeBytes }
+    }
+
+    /// Shown whenever the selection contains a synced file, whether or not the
+    /// all-copies note is also on screen. A note, not a change to the buttons.
+    private var iCloudWarning: String? {
+        LargeFile.iCloudDeletionWarning(
+            syncedCount: files.filter(\.syncsWithICloud).count,
+            totalCount: files.count
+        )
+    }
+
+    /// Names the copies in a fully-selected group by, well, their name: the row
+    /// label of the first copy, since every copy has identical content and any of
+    /// them identifies the thing being lost.
+    private func groupLabel(_ group: DuplicateGroup) -> String {
+        guard let fileID = group.fileIDs.first,
+              let file = files.first(where: { $0.id == fileID }) else {
+            return String(localized: "these files")
+        }
+        return file.displayName
+    }
+
+    private var sortedFiles: [LargeFile] {
+        files.sorted { $0.sizeBytes > $1.sizeBytes }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppStyle.Spacing.medium) {
+            VStack(alignment: .leading, spacing: AppStyle.Spacing.xSmall) {
+                Text("Move selected files to Trash?")
+                    .font(AppStyle.Typography.pageTitle)
+                    .foregroundStyle(AppColors.textPrimary)
+
+                Text("These are your own files. Purge moves only the ones you picked to Trash, and you can put them back if you change your mind.")
+                    .font(AppStyle.Typography.callout)
+                    .foregroundStyle(AppColors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            ScrollView {
+                LazyVStack(spacing: AppStyle.Spacing.small) {
+                    ForEach(sortedFiles) { file in
+                        fileCard(file)
+                    }
+                }
+                .padding(.vertical, AppStyle.Spacing.xxxSmall)
+            }
+            .frame(minHeight: 260)
+
+            if !fullyConsumedDuplicateGroups.isEmpty {
+                allCopiesWarning
+            }
+
+            if let iCloudWarning {
+                LargeFileCautionNote { Text(iCloudWarning) }
+            }
+
+            RemovalSheetFooter(
+                sizeLine: RemovalSizeLine.text(toTrash: totalBytes),
+                confirmTitle: String(localized: "Move \(files.count) to Trash"),
+                itemCount: files.count,
+                onCancel: onCancel,
+                onConfirm: onConfirm
+            )
+        }
+        .padding(AppStyle.Spacing.large)
+        .frame(minWidth: 580, minHeight: 500)
+        .background(AppColors.surfaceBase)
+    }
+
+    /// One selected file as a card, matching the scan rows: its icon, name, and
+    /// folder, with the size on the right.
+    private func fileCard(_ file: LargeFile) -> some View {
+        HStack(spacing: AppStyle.Spacing.small) {
+            Image(systemName: file.category.symbolName)
+                .foregroundStyle(AppColors.textSecondary)
+                .frame(width: 20)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: AppStyle.Spacing.xxxSmall) {
+                Text(file.displayName)
+                    .font(AppStyle.Typography.rowTitle)
+                    .foregroundStyle(AppColors.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                HStack(spacing: AppStyle.Spacing.xxSmallPlus) {
+                    Text(file.path.deletingLastPathComponent().path)
+                        .font(AppStyle.Typography.metadata)
+                        .foregroundStyle(AppColors.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    if file.syncsWithICloud {
+                        LargeFileICloudMark()
+                    }
+                }
+
+                if let kind = file.kind {
+                    Text(kind.explanation)
+                        .font(AppStyle.Typography.metadata)
+                        .foregroundStyle(AppColors.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Spacer(minLength: AppStyle.Spacing.xSmall)
+
+            Text(file.formattedSize)
+                .font(AppStyle.Typography.metadataEmphasis.numbers)
+                .foregroundStyle(AppColors.textSecondary)
+                .monospacedDigit()
+        }
+        .padding(.horizontal, AppStyle.Spacing.small)
+        .padding(.vertical, AppStyle.Spacing.small)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: AppStyle.Radius.lg, style: .continuous)
+                .fill(AppColors.surfaceCard)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppStyle.Radius.lg, style: .continuous)
+                .strokeBorder(AppColors.borderSubtle, lineWidth: 1)
+        )
+    }
+
+    /// How many fully-selected groups get named before the note switches to a
+    /// count. A Select All over a scan full of duplicates can consume dozens of
+    /// groups, and this note sits in a sheet with no maximum height — naming them
+    /// all would push the buttons off the bottom of the screen.
+    private static let namedConsumedGroupLimit = 3
+
+    private var namedConsumedGroups: [DuplicateGroup] {
+        Array(fullyConsumedDuplicateGroups.prefix(Self.namedConsumedGroupLimit))
+    }
+
+    private var remainingConsumedGroupCount: Int {
+        max(fullyConsumedDuplicateGroups.count - Self.namedConsumedGroupLimit, 0)
+    }
+
+    /// Deliberately a note, not a blocker: deleting every copy is a legitimate
+    /// thing to want. It just shouldn't happen by accident after a Select All.
+    private var allCopiesWarning: some View {
+        LargeFileCautionNote {
+            VStack(alignment: .leading, spacing: AppStyle.Spacing.xxxSmall) {
+                ForEach(namedConsumedGroups) { group in
+                    Text("You're deleting all \(group.copyCount) copies of \(groupLabel(group)). No copy will remain.")
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                }
+                if remainingConsumedGroupCount > 0 {
+                    Text("…and \(remainingConsumedGroupCount) more sets where every copy is selected.")
+                }
+            }
+        }
+    }
+}
+
+/// Reviews a "keep one of each, delete the rest" before anything moves.
+///
+/// This is where the selection method is visible: it names the rule up top and,
+/// per set, marks the copy being kept against the ones going to Trash. The keeper
+/// is a tap away from changing, so a user who disagrees with the suggestion moves
+/// it here rather than cancelling and hunting through the list.
+struct DuplicateCleanupSheet: View {
+    let request: DuplicateCleanupRequest
+    let onCancel: () -> Void
+    let onConfirm: ([String: String]) -> Void
+
+    @State private var keeperByGroup: [String: String]
+
+    init(
+        request: DuplicateCleanupRequest,
+        onCancel: @escaping () -> Void,
+        onConfirm: @escaping ([String: String]) -> Void
+    ) {
+        self.request = request
+        self.onCancel = onCancel
+        self.onConfirm = onConfirm
+        _keeperByGroup = State(
+            initialValue: Dictionary(
+                uniqueKeysWithValues: request.sets.map { ($0.id, $0.suggestedKeeperID) }
+            )
+        )
+    }
+
+    private func keeperID(for set: DuplicateCopySet) -> String {
+        keeperByGroup[set.id] ?? set.suggestedKeeperID
+    }
+
+    /// One copy per set is kept, the rest go, so this never changes as keepers move.
+    private var deleteCount: Int {
+        request.sets.reduce(0) { $0 + $1.copies.count - 1 }
+    }
+
+    private var reclaimedBytes: Int64 {
+        request.sets.reduce(Int64(0)) { total, set in
+            let keeper = keeperID(for: set)
+            return total + set.copies.filter { $0.id != keeper }.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        }
+    }
+
+    /// Copies this keeper selection will actually trash that also sync with
+    /// iCloud. Keeping the synced copy and trashing only local ones says nothing.
+    /// Reads the keeper state, so changing which copy stays recomputes it.
+    private var iCloudWarning: String? {
+        let trashed = request.sets.flatMap { set in
+            let keeper = keeperID(for: set)
+            return set.copies.filter { $0.id != keeper }
+        }
+        return LargeFile.iCloudDeletionWarning(
+            syncedCount: trashed.filter(\.syncsWithICloud).count,
+            totalCount: trashed.count
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppStyle.Spacing.medium) {
+            VStack(alignment: .leading, spacing: AppStyle.Spacing.xSmall) {
+                Text("Delete extra copies")
+                    .font(AppStyle.Typography.pageTitle)
+                    .foregroundStyle(AppColors.textPrimary)
+
+                Text("Every copy is identical, so keeping any one is safe. Purge keeps the copy in a real folder over one in Downloads, a cache, or a build folder, and prefers the original name. The rest go to Trash. Tap a copy to keep it instead.")
+                    .font(AppStyle.Typography.callout)
+                    .foregroundStyle(AppColors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            ScrollView {
+                LazyVStack(spacing: AppStyle.Spacing.small) {
+                    ForEach(request.sets) { set in
+                        setCard(set)
+                    }
+                }
+                .padding(.vertical, AppStyle.Spacing.xxxSmall)
+            }
+            .frame(minHeight: 280)
+
+            if let iCloudWarning {
+                LargeFileCautionNote { Text(iCloudWarning) }
+            }
+
+            HStack(spacing: AppStyle.Spacing.small) {
+                Text("Keeping \(request.sets.count), moving \(formatBytes(reclaimedBytes)) to Trash")
+                    .font(AppStyle.Typography.metadataEmphasis)
+                    .foregroundStyle(AppColors.textSecondary)
+
+                Spacer()
+
+                Button("Cancel", action: onCancel)
+                    .buttonStyle(.purge(.secondary))
+                    .keyboardShortcut(.cancelAction)
+
+                Button("Move \(deleteCount) to Trash") {
+                    onConfirm(keeperByGroup)
+                }
+                .buttonStyle(.purge(.destructive))
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(AppStyle.Spacing.large)
+        .frame(minWidth: 580, minHeight: 500)
+        .background(AppColors.surfaceBase)
+    }
+
+    /// One duplicate set as a card, matching the duplicate rows on the tab: a
+    /// header naming the file and its size, then a row per copy.
+    private func setCard(_ set: DuplicateCopySet) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: AppStyle.Spacing.xSmall) {
+                Text(set.copies.first?.displayName ?? String(localized: "Duplicate set"))
+                    .font(AppStyle.Typography.rowTitle)
+                    .foregroundStyle(AppColors.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: AppStyle.Spacing.xSmall)
+                Text("\(formatBytes(set.copies.first?.sizeBytes ?? 0)) each")
+                    .font(AppStyle.Typography.metadata.numbers)
+                    .foregroundStyle(AppColors.textSecondary)
+            }
+            .padding(.horizontal, AppStyle.Spacing.small)
+            .padding(.vertical, AppStyle.Spacing.small)
+
+            ForEach(Array(set.copies.enumerated()), id: \.element.id) { index, file in
+                if index > 0 {
+                    Rectangle()
+                        .fill(AppColors.borderSubtle)
+                        .frame(height: 0.5)
+                }
+                copyRow(set: set, file: file)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: AppStyle.Radius.lg, style: .continuous)
+                .fill(AppColors.surfaceCard)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppStyle.Radius.lg, style: .continuous)
+                .strokeBorder(AppColors.borderSubtle, lineWidth: 1)
+        )
+    }
+
+    private func copyRow(set: DuplicateCopySet, file: LargeFile) -> some View {
+        let isKeeper = keeperID(for: set) == file.id
+        // Copies in a set share a name, so the folder is what tells them apart.
+        return HStack(spacing: AppStyle.Spacing.small) {
+            Image(systemName: isKeeper ? "largecircle.fill.circle" : "circle")
+                .foregroundStyle(isKeeper ? AppColors.actionPrimary : AppColors.textTertiary)
+                .accessibilityHidden(true)
+
+            Text(file.path.deletingLastPathComponent().path)
+                .font(AppStyle.Typography.metadata)
+                .foregroundStyle(isKeeper ? AppColors.textPrimary : AppColors.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            if file.syncsWithICloud {
+                LargeFileICloudMark()
+            }
+
+            Spacer(minLength: AppStyle.Spacing.xSmall)
+
+            statusTag(isKeeper: isKeeper)
+        }
+        .padding(.horizontal, AppStyle.Spacing.small)
+        .padding(.vertical, AppStyle.Spacing.small)
+        .contentShape(Rectangle())
+        .onTapGesture { keeperByGroup[set.id] = file.id }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            file.path.deletingLastPathComponent().path
+                + (file.syncsWithICloud ? String(localized: ", syncs with iCloud") : "")
+        )
+        .accessibilityValue(isKeeper ? "Keeping" : "Moving to Trash")
+        .accessibilityAddTraits(isKeeper ? [.isSelected] : [])
+    }
+
+    /// Reuses the app's tag palette: green for the copy that stays, red for the
+    /// ones headed to Trash, so the plan reads at a glance.
+    private func statusTag(isKeeper: Bool) -> some View {
+        Text(isKeeper ? LocalizedStringKey("Keep") : LocalizedStringKey("Trash"))
+            .font(AppStyle.Typography.metadataEmphasis)
+            .foregroundStyle(isKeeper ? AppColors.statusSafeText : AppColors.statusDangerText)
+            .padding(.horizontal, AppStyle.Spacing.xSmall)
+            .padding(.vertical, AppStyle.Spacing.xxxSmall)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(isKeeper ? AppColors.statusSafeFill : AppColors.statusDangerFill)
+            )
+    }
+}
+
+/// The cloud on a synced file, in the scan list and on both trash sheets. Gray,
+/// like Finder's: with Desktop & Documents syncing, most rows from those folders
+/// carry it, so it stays quiet.
+struct LargeFileICloudMark: View {
+    var body: some View {
+        Image(systemName: "icloud")
+            .font(AppStyle.Typography.metadata)
+            .foregroundStyle(AppColors.textSecondary)
+            .help("Syncs with iCloud. Trashing it also removes it from your other devices.")
+            .accessibilityLabel("Syncs with iCloud")
+    }
+}
+
+/// The caution box on the large-file trash sheets: the all-copies note and the
+/// iCloud note. A warning, not a blocker.
+struct LargeFileCautionNote<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(alignment: .top, spacing: AppStyle.Spacing.xSmall) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(AppColors.statusCheckText)
+                .accessibilityHidden(true)
+
+            content
+                .font(AppStyle.Typography.metadata)
+                .foregroundStyle(AppColors.textSecondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(AppStyle.Spacing.small)
+        .background(
+            RoundedRectangle(cornerRadius: AppStyle.Radius.sm, style: .continuous)
+                .fill(AppColors.statusCheckFill)
+        )
+        .accessibilityElement(children: .combine)
+    }
+}
+
+#Preview("Large Files") {
+    LargeFilesView(isLoading: false, onScan: {}, searchQuery: .constant(""))
+        .environmentObject(PurgeStore())
+        .frame(width: 720, height: 560)
+}

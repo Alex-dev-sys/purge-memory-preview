@@ -1,0 +1,663 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>Purge</title>
+    <item>
+      <title>Version 1.14.1</title>
+      <pubDate>Sun, 08 Nov 2026 00:19:34 +0000</pubDate>
+      <sparkle:version>42</sparkle:version>
+      <sparkle:shortVersionString>1.14.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Uninstall Purge</strong>: Settings and the Purge menu can now remove Purge itself. It turns off its background parts first, then moves itself to the Trash.</li>
+          <li><strong>Suites show as one entry</strong>: The App Uninstaller groups a vendor's apps that share a folder, like DaVinci Resolve's four, into one entry you can open.</li>
+          <li><strong>Vendor uninstallers come first</strong>: When a suite has its own uninstaller, Purge points you to it before you remove only part of the suite.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.14.1/Purgev1.14.1.dmg"
+        sparkle:edSignature="oSvbWuOwl9B2UJZ1xta9fFriPQELU/GXK8PuOU77/8EMjpEgy9EA5eUpb7tmu1GRDmb6i4cTd2GHdPwW5pHTBQ=="
+        length="11843592"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.14.0</title>
+      <pubDate>Sat, 07 Nov 2026 21:11:10 +0000</pubDate>
+      <sparkle:version>41</sparkle:version>
+      <sparkle:shortVersionString>1.14.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>More caches found</strong>: App Caches and Dev Tools now find caches Purge missed, such as Chromium caches deeper in an app's folder, stopped Gradle daemons' logs and the clang module cache.</li>
+          <li><strong>Old tool versions</strong>: Dev Tools lists old Android NDKs, unused emulator images, old Figma profiles and old Claude Code downloads, each as Check First.</li>
+          <li><strong>Playwright browsers in use stay</strong>: Dev Tools offers only the Playwright browser builds no installed Playwright uses.</li>
+          <li><strong>Browsers keep their offline data</strong>: Purge no longer offers browsers' Service Worker caches, so sites keep sending notifications.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.14.0/Purgev1.14.0.dmg"
+        sparkle:edSignature="DuQQMIBohhCOJ1RARFKphJwUc3CZxTOJ0B9y34xJXmKAgmiMo6X+MFQpwwKRDQ7F7NAQuIkaB024eO6Ivd61Cw=="
+        length="11512444"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.13.4</title>
+      <pubDate>Sat, 07 Nov 2026 01:04:22 +0000</pubDate>
+      <sparkle:version>40</sparkle:version>
+      <sparkle:shortVersionString>1.13.4</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Apps on external drives</strong>: The App Uninstaller now lists and removes apps in each attached drive's Applications folder and in folders you add.</li>
+          <li><strong>Faster scans</strong>: Every scan is at least twice as fast. The Apps scan takes about 3 seconds instead of 9.</li>
+          <li><strong>Excluded simulator runtimes stay excluded</strong>: A runtime you exclude no longer comes back after it remounts or is downloaded again.</li>
+          <li><strong>Busy simulators are held back</strong>: Dev Tools offers only simulators that are shut down.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.13.4/Purgev1.13.4.dmg"
+        sparkle:edSignature="OWQh6ilH+YLIdVcggwBTFgpRwUk52RkowsmLEcfZW+2EsQqxuV+ZRKuL44UaM3kLgdji8gcOcAMbXFwkxWdzDA=="
+        length="11431822"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.13.3</title>
+      <pubDate>Wed, 04 Nov 2026 14:38:12 +0000</pubDate>
+      <sparkle:version>39</sparkle:version>
+      <sparkle:shortVersionString>1.13.3</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Standard accounts can remove admin-locked apps</strong>: On a Mac where you aren't an administrator, Purge asks for an administrator's name and password, the way Finder does.</li>
+          <li><strong>Gradle caches in React Native and Flutter projects</strong>: Dev Tools now finds the .gradle folder inside a project's android folder.</li>
+          <li><strong>Duplicates keep the original in every language</strong>: Purge recognises Finder's copy names in every language macOS ships.</li>
+          <li><strong>Totals that match the clean</strong>: A folder two rows list is counted once, and the menu says "You're all clear" only when Clean has nothing left to take.</li>
+          <li><strong>Plainer Apple Intelligence text</strong>: The popover and confirmation say in short sentences what Remove and Download Again do.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.13.3/Purgev1.13.3.dmg"
+        sparkle:edSignature="u5+7FhfgvgexQ1gwSC1lrELrzAaW2Zo819m92jyE8588yWuMZa4a/LQNfwzYUQ7jw7lapqf1/JFVritqtLdWCg=="
+        length="11089485"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.13.2</title>
+      <pubDate>Tue, 03 Nov 2026 13:55:49 +0000</pubDate>
+      <sparkle:version>38</sparkle:version>
+      <sparkle:shortVersionString>1.13.2</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>The last scan shows while Purge scans again</strong>: Reopening Purge shows what the last scan found, dimmed and dated, and each row updates in place as the new scan reaches it.</li>
+          <li><strong>No Command Line Tools prompt at launch</strong>: On a Mac without Xcode or the Command Line Tools, opening Purge no longer asks you to install them.</li>
+          <li><strong>Admin-locked apps come out without Full Disk Access</strong>: With secure removal on, Purge's helper moves an app an administrator installed even without Full Disk Access. When it can't, the row says why.</li>
+          <li><strong>Apple Intelligence models count only what's on disk</strong>: The row no longer adds up records for models macOS already removed.</li>
+          <li><strong>Cleanup History lists what couldn't be removed</strong>: Each entry keeps the items a clean couldn't remove, with the reason. Older simulator runtimes that macOS keeps are no longer offered.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.13.2/Purgev1.13.2.dmg"
+        sparkle:edSignature="jW2Lr+ErkkdgO62lHEoimqNXe2VoEGUJOptyt/PQ22RkVB3hAsAoCmN19QgHgAJGBaWzGVc5uv23uMCiY6VhDw=="
+        length="11142225"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.13.1</title>
+      <pubDate>Mon, 26 Oct 2026 23:32:46 +0000</pubDate>
+      <sparkle:version>37</sparkle:version>
+      <sparkle:shortVersionString>1.13.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Keep Only in iCloud for Large Files</strong>: An iCloud chip lists synced files that also take space on this Mac. Keep Only in iCloud removes the local copy, like Finder's Remove Download. The file stays in iCloud and downloads again when opened.</li>
+          <li><strong>Large Files scans linked folders</strong>: A home folder moved to another drive and replaced with a link is scanned where it really lives. Links into ~/Library or a drive's root are left alone.</li>
+          <li><strong>The clean result screen says what happened</strong>: A clean where everything failed no longer shows a checkmark over 0 bytes. Items left behind sit in one card with a reason and a Retry button on each row.</li>
+          <li><strong>Retry works for every kind of item</strong>: Large Files, duplicates, AI models and uninstall leftovers can be retried. Items Purge refused for safety are listed instead of dropped.</li>
+          <li><strong>Uninstalling a just-installed app from Finder works</strong>: Uninstall with Purge, the Dock icon and the Shortcuts action scan again for an app the list is missing. The Large Files tab starts on All, and the Overview row names both of its filters.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.13.1/Purgev1.13.1.dmg"
+        sparkle:edSignature="WcMunDkde/PPg5lSo7vSDT33yj6vANTwxytv8xQbWoBLgsyUoFKiuKagGdtdZJpYrXqY40R5dSPUdJMiU2NfBA=="
+        length="10841688"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.13.0</title>
+      <pubDate>Sat, 24 Oct 2026 13:22:17 +0000</pubDate>
+      <sparkle:version>36</sparkle:version>
+      <sparkle:shortVersionString>1.13.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Command-line tools in the uninstaller</strong>: A new section lists tools installed by a script and tools from Homebrew, npm, pipx, uv and Cargo. Script installs go to the Trash. Package-manager tools are removed by their manager, permanently, after you confirm.</li>
+          <li><strong>Homebrew cask apps uninstall through Homebrew</strong>: The review sheet offers Remove with Homebrew, which deletes the app permanently, or Move All to Trash, which keeps it recoverable.</li>
+          <li><strong>Downloaded AI models in Large Files</strong>: Hugging Face, PyTorch Hub, Whisper, GPT4All, Jan, DiffusionBee and Draw Things models are listed, Check First, with stray weight files over 100 MB.</li>
+          <li><strong>Running simulators are shown</strong>: Booted simulators appear in Dev Tools with a note to shut them down first. A runtime row says when it only runs certain devices.</li>
+          <li><strong>Faster, with fewer freezes</strong>: Disk checks run off the main thread, project scans finish more than twice as fast, text is set in Onest, Settings is shorter, and waiting tabs say what they wait for.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.13.0/Purgev1.13.0.dmg"
+        sparkle:edSignature="/QK5vZVFIJmflqHRf4CWOULK/JNj5pYL9yak0kk+oiHdeM6zlXBBbSxjzfu0A667K01qrF+bUB0ZinVjwQYpAw=="
+        length="10681089"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.12.0</title>
+      <pubDate>Tue, 20 Oct 2026 12:40:49 +0000</pubDate>
+      <sparkle:version>35</sparkle:version>
+      <sparkle:shortVersionString>1.12.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>See what is in Everything else</strong>: Click the row on the Overview and a map shows the space Purge doesn't list: app data, your own files, caches off its list, and what macOS manages. It is read only.</li>
+          <li><strong>Leftovers find more removed apps</strong>: Folders named after an app, and hidden home folders such as Antigravity's and Trae's, are offered once the app is gone. Uninstalling those apps lists the folders too, Check First.</li>
+          <li><strong>Scheduled cleaning retries and asks</strong>: A failed clean stays due and tries again in an hour. Turning the schedule back on starts a fresh interval. Purge asks before quitting during any clean.</li>
+          <li><strong>App caches by their real shape</strong>: Application Support caches are offered only inside a Chromium-shaped profile, one row per app, with each folder named in the confirm sheet. New Safe entries for Codex, EffectCraft and the Dart analysis server.</li>
+          <li><strong>Large Files explains an empty result</strong>: A card shows cloud-only files, media libraries it stepped over, the folders it checked and any macOS refused. Apple Intelligence Download Again brings back only the sets Purge removed.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.12.0/Purgev1.12.0.dmg"
+        sparkle:edSignature="2JJZiAN4JmrXXPrWyOEyhF3DvhxYu8tkisMDf1/Y0I6ouAJRLBesKrtmHOnhMt6dW0PG3lIDM6r58n1VidhGCw=="
+        length="9928565"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.11.1</title>
+      <pubDate>Sat, 17 Oct 2026 10:46:58 +0000</pubDate>
+      <sparkle:version>34</sparkle:version>
+      <sparkle:shortVersionString>1.11.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Leftovers keep what installed apps use</strong>: Data an installed app still claims, like OrbStack's Docker storage, is no longer offered.</li>
+          <li><strong>Uninstalling keeps shared app groups</strong>: A group another installed app lists stays, marked "Kept, still used by" that app.</li>
+          <li><strong>Simulators are shown as deleted permanently</strong>: The confirmation and Cleanup History list them apart from what goes to the Trash.</li>
+          <li><strong>Scheduled cleaning runs when it is due</strong>: It checks each time you switch to Purge, includes stale projects, and waits while a review is open.</li>
+          <li><strong>No crash during git checks</strong>: Excluding or cleaning a project while Purge checks it for unsaved changes no longer crashes it.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.11.1/Purgev1.11.1.dmg"
+        sparkle:edSignature="ZyvZ9Nl6SfBsMEFCNXDug7UVT/dCfXEs6rVYXAAT9xJVxlCuOgevSZUPWLHSF67xKo9jHePJxoMJ9wwSxmSDBA=="
+        length="9371524"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.11.0</title>
+      <pubDate>Thu, 15 Oct 2026 09:27:01 +0000</pubDate>
+      <sparkle:version>33</sparkle:version>
+      <sparkle:shortVersionString>1.11.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Security fix.</strong> The git check Purge runs on projects can no longer be made to run a program by a project's own git settings.</li>
+          <li><strong>Projects you are working on stay put.</strong> "Consider stale after" now really uses 6 months, projects used recently are Check First under Show all, and each project card shows its safety level and why.</li>
+          <li><strong>Simulators are never Safe to Clean.</strong> They are removed for good, so they are always Check First.</li>
+          <li><strong>More to find.</strong> Leftover macOS update files in App Caches, labels for restore images, virtual machines and unfinished downloads in Large Files, and apps in subfolders in the uninstaller.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.11.0/Purgev1.11.0.dmg"
+        sparkle:edSignature="7XVNhBl/e8+fwY/hD0L7MG7RfKaKYlABLRDAiJDRMXCaYsZXBQRHR4vPklcRyRBy4+IRU0MOCyeF4siPqjSTAA=="
+        length="9335958"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.10.0</title>
+      <pubDate>Mon, 12 Oct 2026 16:13:53 +0000</pubDate>
+      <sparkle:version>32</sparkle:version>
+      <sparkle:shortVersionString>1.10.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Remove the Apple Intelligence models.</strong> On macOS 27 with Apple silicon, Overview can release the on-device models through Apple's own service and keep them from downloading again. Download Again brings them back.</li>
+          <li><strong>Simplified Chinese.</strong> Purge is now available in Simplified Chinese.</li>
+          <li><strong>iCloud warning in Large Files.</strong> Files that sync with iCloud Drive get a cloud badge, and the confirmation says trashing them removes them from your other devices too.</li>
+          <li><strong>Fixes.</strong> Uninstalling admin-installed apps works again instead of waiting five minutes, and a rare stuck scan is gone.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.10.0/Purgev1.10.0.dmg"
+        sparkle:edSignature="yPuYenEDcApVBmXTXANmJx6sXetDgFRFixOlDIi3GdsgF/elK9OMlOUvdGMB03DXvldUfX3wx8JN5Dkzdwq1Cg=="
+        length="9224280"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.9.0</title>
+      <pubDate>Fri, 09 Oct 2026 21:28:52 +0000</pubDate>
+      <sparkle:version>31</sparkle:version>
+      <sparkle:shortVersionString>1.9.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Restart to Update.</strong> Turn on Download and install updates automatically in Settings and new versions download in the background. Restart to Update installs one straight away. It's off by default.</li>
+          <li><strong>Remove unused simulator runtimes.</strong> Dev Tools lists the iOS, watchOS, tvOS and visionOS runtimes Xcode keeps, about 8 GB each, and removes the ones no simulator uses.</li>
+          <li><strong>Uninstall with Purge.</strong> Drop an app on Purge's Dock icon, or turn on the Finder item in Settings and right-click an app, to review it and its leftovers.</li>
+          <li><strong>Keyboard shortcuts.</strong> ⌘1 to ⌘5 switch tabs and ⌘F jumps to search. The safety filters move to ⌥⌘1 to ⌥⌘3.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.9.0/Purgev1.9.0.dmg"
+        sparkle:edSignature="bIjeKDalbTGvcoRC20Se0XXTDCSpewK5d6lNuywB5PXlFeOuq+TznNLcvT2zcSBIWSkq91QwJymwq6MsqywHBQ=="
+        length="8839722"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.8.2</title>
+      <pubDate>Tue, 06 Oct 2026 11:31:54 +0000</pubDate>
+      <sparkle:version>30</sparkle:version>
+      <sparkle:shortVersionString>1.8.2</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Time Machine snapshots in Overview.</strong> A new row under Everything else shows how many local snapshots there are and when the oldest was taken.</li>
+          <li><strong>Remove old snapshots.</strong> Remove deletes the older ones with no password, and always keeps the newest snapshot and the one from your last backup.</li>
+          <li><strong>Know what you're removing.</strong> An info button explains snapshots, and the confirmation warns they may hold the only copy of recent changes.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.8.2/Purgev1.8.2.dmg"
+        sparkle:edSignature="nDHCKJo9D2tna3x8UMuuvwl4ppy1R/kOfVN1VoBFUrmfr9Jm1x3dV9DPW3S2dW2EoMtvY1zuTWDyip6atRqVBA=="
+        length="8702711"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.8.1</title>
+      <pubDate>Tue, 06 Oct 2026 10:30:53 +0000</pubDate>
+      <sparkle:version>29</sparkle:version>
+      <sparkle:shortVersionString>1.8.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Safe items are only caches.</strong> Ruby, Android, Stack, Dart and CocoaPods rows now cover only their caches, and Maven, Gradle, NuGet, Cabal, Playwright and iOS Simulators move to Check First.</li>
+          <li><strong>Things Purge no longer offers.</strong> Password manager and authenticator caches, Screen Time, JetBrains Local History, Zed's workspace database, system app caches, and Spotify's cache while songs are downloaded offline.</li>
+          <li><strong>More caches found.</strong> App update downloads, Electron and Chromium app caches, iPhone and iPad software updates, old Claude Code and Cursor Agent versions, and caches for pnpm, Yarn, Prisma, Expo and more.</li>
+          <li><strong>Smaller fixes.</strong> macOS installers are found again, Crash Reports is no longer counted twice, and one damaged history entry no longer loses the rest of your cleaning history.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.8.1/Purgev1.8.1.dmg"
+        sparkle:edSignature="W/JhBCisqxLMmZUqEPSogWanxawuyStI7n8oS1q1s6ZKxH6TckGpLbbzJstoJABvrz5KtFCS1c4qmeNF2XS6Bw=="
+        length="8632694"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.8.0</title>
+      <pubDate>Mon, 05 Oct 2026 23:49:53 +0000</pubDate>
+      <sparkle:version>28</sparkle:version>
+      <sparkle:shortVersionString>1.8.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Spotlight, Shortcuts and Siri actions.</strong> Scan for Junk tells you how much is safe to clean, Clean Safe Junk moves Safe items in App Caches and Dev Tools to the Trash, and Uninstall an App opens the uninstaller on the app you pick. Spotlight actions need macOS 26 or later.</li>
+          <li><strong>Check for Updates in the menus.</strong> It is now in the Purge menu and the menu bar dropdown, so it works with the Dock icon hidden.</li>
+          <li><strong>Settings with Command-Comma.</strong> Settings in the Purge menu now opens the Settings tab, and ⌘, does the same.</li>
+          <li><strong>Real clean progress.</strong> The cleaning screen and the menu bar now move while large folders such as Telegram media are emptied, and the space freed counts only what reached the Trash.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.8.0/Purgev1.8.0.dmg"
+        sparkle:edSignature="jOoq/hC+a/V7wrOWV7GsRQxaLoy/JwpprhUluEVFDAbHCUDEIZVirdC1oszPhDcFUijb3ruLgMDBYXPY6bGtAw=="
+        length="8528919"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.7.1</title>
+      <pubDate>Sun, 04 Oct 2026 23:24:43 +0000</pubDate>
+      <sparkle:version>27</sparkle:version>
+      <sparkle:shortVersionString>1.7.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Clean Safe Items from the Overview.</strong> One button moves the Safe items in App Caches and Dev Tools, after showing how much comes from each.</li>
+          <li><strong>Select All picks Safe items first.</strong> On the All filter it ticks only Safe items, and a link adds the Check First items if you want them.</li>
+          <li><strong>Projects you're working on stay off the list.</strong> Developer Projects now judges age by the project's own files and Git activity, and hides projects that are open in a terminal, dev server or editor.</li>
+          <li><strong>Orphaned Git worktrees from every agent tool.</strong> A new Check First row lists worktrees from Cursor, Codex, Conductor, T3 Code and Claude Code only once Git no longer lists them.</li>
+          <li><strong>Exclude folders from Large Files.</strong> Right-click a row or use Settings, and Large Files skips that folder from then on.</li>
+          <li><strong>Docker Desktop is now Check First.</strong> Its folder holds every image, container and volume, so one-click and scheduled cleaning no longer pick it up.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.7.1/Purgev1.7.1.dmg"
+        sparkle:edSignature="qm645tPVc6fHL8hnrC3bE67OkgDentlrMl285wMNLvV+owp7dFANwf+utb/9hZ8deAhVfE0RUDdtKeci2LG8Dg=="
+        length="8448635"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.7.0</title>
+      <pubDate>Thu, 01 Oct 2026 02:46:15 +0000</pubDate>
+      <sparkle:version>26</sparkle:version>
+      <sparkle:shortVersionString>1.7.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>An Overview of the whole disk.</strong> Purge opens on a breakdown of your disk into App Caches, Dev Tools, Large Files, installed apps and leftovers from deleted apps, with each file counted once. Clicking App Caches or Dev Tools opens the tab with its safe items selected.</li>
+          <li><strong>Scan Everything, one step at a time.</strong> Scans run one after another so the Mac stays responsive, and opening a tab moves its scan to the front.</li>
+          <li><strong>Scans first, asks later.</strong> Purge scans what macOS leaves open before it asks for Full Disk Access, and never touches your personal folders or other apps' data without it.</li>
+          <li><strong>A simpler sidebar.</strong> Tabs are grouped into Clean and Review, and the sidebar shows how much is already in the Trash. Clean from each tab instead of the sidebar.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.7.0/Purgev1.7.0.dmg"
+        sparkle:edSignature="udVoYkqhoA7Q0rC2L1bcnQHJXXiV75QAkWcUcF9WzKGlevxt+Z7nRj8iIBGWqIKQxEE3YhhVsWuL5vhxD37BDg=="
+        length="8457596"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.6.1</title>
+      <pubDate>Sun, 27 Sep 2026 08:21:33 +0000</pubDate>
+      <sparkle:version>25</sparkle:version>
+      <sparkle:shortVersionString>1.6.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Deleted-app reviews tell you when they stop working.</strong> If macOS switches Purge's background watcher off, or the watcher stops, the sidebar says reviews are paused and offers the fix. Settings shows the watcher's state under the toggle.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.6.1/Purgev1.6.1.dmg"
+        sparkle:edSignature="Yvn/unvtDuVTo2FDzPPRN5nLVRLak0BTqnq5dLZFxaSELXpFFPt1tx5nHXc8vocECSRmPGd0ayIYUX2imMApDg=="
+        length="8196248"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.6.0</title>
+      <pubDate>Sat, 26 Sep 2026 22:51:27 +0000</pubDate>
+      <sparkle:version>24</sparkle:version>
+      <sparkle:shortVersionString>1.6.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Review leftovers when an app is deleted.</strong> Turn it on in Settings under Deleted Apps. When an app leaves Applications, even while Purge is quit, Purge opens with just that app's leftovers. Nothing moves until you confirm, and only files in your home folder that match the app start ticked. App updates do not open a review. Off by default.</li>
+          <li><strong>Size comparisons you can picture.</strong> Freed space is now compared with things on a Mac, like Slack, Photoshop, macOS updates, and Xcode. The line reads "That's room for…" and counts round down so it is always true.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.6.0/Purgev1.6.0.dmg"
+        sparkle:edSignature="ozpfaq7rAYNSG8fEGAD+Fq4c3W+cWLCYIU45EuL6BdUvTOK74JINx/ODrFq9QXqJ3sSPVW7fU8Z277m5g7mrBw=="
+        length="8169979"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.5.3</title>
+      <pubDate>Thu, 24 Sep 2026 13:05:00 +0000</pubDate>
+      <sparkle:version>23</sparkle:version>
+      <sparkle:shortVersionString>1.5.3</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li><strong>Find unused Cursor agent folders.</strong> Dev Tools lists finished Cursor agent checkouts under ~/.cursor/worktrees, and leftover temp or empty-window folders under ~/.cursor/projects. Live work, settings, login, real project folders, and chat history stay off the list. These rows are Check First and start unticked.</li>
+          <li><strong>Skip a browser framework the running app still uses.</strong> Purge hides a Chromium framework version a live process is still executing from. If it cannot tell which version that is, every leftover stays hidden until you quit. The browser also deletes leftover versions itself on relaunch.</li>
+          <li><strong>Sort installed apps by when you last opened them.</strong> Apps with no recorded open stay in the list, labeled Not opened, and sort after every app that has a date.</li>
+          <li><strong>Show an uninstaller item in Finder.</strong> Right-click an app, a leftover, or a review row. One location opens directly. Several become a submenu, largest first. Copy Path is on the same menu.</li>
+          <li><strong>Show the uninstaller before sizes finish.</strong> Apps appear immediately, then real totals fill in. The list stays alphabetical until measuring is done. A list view sits next to the grid, and the layout you pick is remembered.</li>
+          <li><strong>Find Application Support folders from removed apps.</strong> Leftovers includes bundle-id folders sitting directly in ~/Library/Application Support. They stay Check First and unticked, and a folder touched in the last 30 days stays hidden.</li>
+          <li><strong>Scans use less memory.</strong> Same results as before, with a tighter ceiling on folder sizing and Large Files thumbnails.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.5.3/Purgev1.5.3.dmg"
+        sparkle:edSignature="MoMtQAatbivlRa+URl2ntxhooT1J3cI77YQgBHzOmXiVB5EilV07K4g5h1rHY24KpVN+VcykgoyHHsHeICuDDQ=="
+        length="7827544"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.5.2</title>
+      <pubDate>Tue, 16 Sep 2026 15:00:00 +0000</pubDate>
+      <sparkle:version>22</sparkle:version>
+      <sparkle:shortVersionString>1.5.2</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li>Purge now finds leftovers from apps you no longer have installed. Caches, containers, and app data left behind in your Library appear under a new Leftovers view in the App Uninstaller tab, marked Check First, with a review step before anything moves to the Trash.</li>
+          <li>App tiles now glide into their new order when the list finishes measuring each app's size, instead of jumping.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.5.2/Purgev1.5.2.dmg"
+        sparkle:edSignature="3+yubCoup6vio66foTwTuE0h1AvGPXF1gz7HNA7hWDyTRig9XgeG2MO793olLZd3loPg0yDqLjEgiG0W2smQCg=="
+        length="7740606"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.5.1</title>
+      <pubDate>Tue, 16 Sep 2026 12:00:00 +0000</pubDate>
+      <sparkle:version>21</sparkle:version>
+      <sparkle:shortVersionString>1.5.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li>The Uninstaller can now remove apps that macOS installs as root-owned, like Microsoft Teams, which previously failed to delete. An opt-in secure-removal helper, set up once in Settings, moves the locked app and its leftovers to the Trash with no per-uninstall password prompt.</li>
+          <li>Removing an app now selects everything it leaves behind by default, so caches, preferences, containers, saved state, and logs all start ticked and you untick what you want to keep. App tiles and the Uninstall button now show the app's real total footprint.</li>
+          <li>A leftover that another installed app still uses is held back instead of removed. Shared support files arrive unticked and disabled, so uninstalling one app cannot break another.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.5.1/Purgev1.5.1.dmg"
+        sparkle:edSignature="9n+8xOcmCyvEGuq6RaHTgvqL8GqWT91Tms7jLUgwrPWrTsVV5YPv4lqdXoYZhXUm/lvuemiNlrFzwTysHr8nDA=="
+        length="7649475"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.5.0</title>
+      <pubDate>Fri, 11 Sep 2026 12:00:00 +0000</pubDate>
+      <sparkle:version>20</sparkle:version>
+      <sparkle:shortVersionString>1.5.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li>A new Uninstaller tab removes an installed app along with the files it leaves behind: caches, preferences, containers, saved state, logs, and login helpers. Review exactly what will be removed, then it all moves to the Trash in one pass. Matching is strict, so removing one app cannot sweep in files shared across a vendor's other apps.</li>
+          <li>Duplicates has a new Keep one of each button that clears a whole tab in one action. It suggests a copy to keep in each set and marks the rest for the Trash, and you can move the keeper before you confirm.</li>
+          <li>Scheduled cleaning adds a Custom interval, so you can set your own repeat in days, weeks, or months instead of only weekly, monthly, or every three months.</li>
+          <li>The Clean Selected confirmation sheet has been redesigned, so what you picked is clearer to read before you confirm the delete.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.5.0/Purgev1.5.0.dmg"
+        sparkle:edSignature="obvs7qbJVEEzzI+V2ydkcsYlZI21HDhiJxlCwyYmBkFEoa8SiFe3FaxobvxalEFa2yBezkG/QZQVgkhrfM2WBQ=="
+        length="7465599"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.4.0</title>
+      <pubDate>Fri, 28 Aug 2026 12:00:00 +0000</pubDate>
+      <sparkle:version>19</sparkle:version>
+      <sparkle:shortVersionString>1.4.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li>Purge now finds leftover build files for 23 kinds of project, up from 6. Elixir and Erlang, Maven, Gradle, sbt, .NET, PHP, Ruby, Haskell, Zig, OCaml, CMake, Swift packages, Terraform, Godot, Unity and Unreal are all recognized now, along with the folders Next.js, Nuxt, SvelteKit, Astro and Angular leave behind and the caches kept by pytest, mypy, ruff and tox. Every row names the command that brings the folder back. This release also fixes a crash when scanning a second time, where starting a new scan while results from an earlier one were still on screen could quit Purge.</li>
+          <li>Many of the new folders have ordinary names like bin, obj, vendor and Library, so Purge no longer decides anything from a folder's name alone. A folder is offered only when the directory holding it is provably a project of the matching kind, proven by a real project file sitting beside it, so your own folders that happen to share those names are never listed. Unity, Unreal and Terraform go a step further and are listed as Check First rather than Safe to Clean, shown for review but never removed by one-click or scheduled cleaning, and a Terraform folder holding infrastructure state is not offered at all.</li>
+          <li>Size comparisons now measure against computing history rather than photos and hours of video, so a result reads as "82x the original DOOM" or "19 CDs". They appear on the results screen, after a scan finishes, and against your lifetime total in About.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.4.0/Purgev1.4.0.dmg"
+        sparkle:edSignature="rKLLh10I0PCb7U5qA1czuav731UzS4c+LY6hd6w+8HwXezlbBmuZkhEZfUWdi5IPLoSj0OR75xcRwoJb1EnrAw=="
+        length="7308587"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.3.3</title>
+      <pubDate>Thu, 13 Aug 2026 12:00:00 +0000</pubDate>
+      <sparkle:version>18</sparkle:version>
+      <sparkle:shortVersionString>1.3.3</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li>New: menu-bar-only mode. Two toggles in Settings, under Startup, let Purge launch at login and hide its Dock icon so it lives in the menu bar only. When both are on, a login launch starts windowless; opening Purge from the menu bar or Finder brings the window back. With the Dock icon hidden, the app menu is gone, so Quit is only available from the menu bar dropdown.</li>
+          <li>Large Files duplicate badges now read "1 other copy" or "3 other copies" instead of counting the row itself, which previously overstated by one on every row of a group.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.3.3/Purgev1.3.3.dmg"
+        sparkle:edSignature="x3QtByvndfKycRD4ChGFDVAONxQzyZTTILqLozwjlNXgKmoI8BA9urCLzSegu+jKm+Sn7+qg3EBzZL4CuPW3AA=="
+        length="7285943"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.3.2</title>
+      <pubDate>Sat, 08 Aug 2026 12:00:00 +0000</pubDate>
+      <sparkle:version>17</sparkle:version>
+      <sparkle:shortVersionString>1.3.2</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li>New: duplicate detection in Large Files. Byte-identical files are grouped together, so the same video saved under two names reads as one set rather than two unrelated space hogs. Each group shows how many copies exist and how much keeping one would free. Nothing is called a duplicate without a full content match, and Purge never picks which copy survives.</li>
+          <li>Purge now checks for updates once a day and opens the update window when a new version is available. Earlier versions only checked when you asked from the About screen. Nothing is downloaded or installed without your confirmation, and the check can be turned off in Settings, under Updates.</li>
+          <li>Show in Finder and Copy Path are now on the right-click menu for App Caches and Dev Tools rows, so you can see exactly what a row would delete. Rows covering several folders get a submenu listing each location with its size, largest first.</li>
+          <li>Paths under a home folder with a similar name no longer abbreviate wrongly, which could label a menu item with a folder that does not exist.</li>
+          <li>Show in Finder and Copy Path are now available to VoiceOver users, who cannot produce a right-click.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.3.2/Purgev1.3.2.dmg"
+        sparkle:edSignature="QbgXEjTHe2BzKPrnI8OYMGt+OlZjzqi8BDurnhbTF/NEPkE9+I1j4m7I8Bkn/bOtmvn5pUEAacLvEzZt/3aqDg=="
+        length="7266897"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.3.1</title>
+      <pubDate>Fri, 07 Aug 2026 12:00:00 +0000</pubDate>
+      <sparkle:version>16</sparkle:version>
+      <sparkle:shortVersionString>1.3.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li>New: search in Large Files. A search field filters the list as you type, matching the file name, the folder it sits in, and its source label. Multiple words each have to match somewhere, so "house dragon" finds both "House.of.the.Dragon.mkv" and "House of the Dragon.mkv".</li>
+          <li>Scanning and tab switching are smooth. All four scanners now run off the main thread and per-row work is done once per scan instead of on every render. First opening Large Files went from a 1.15 second freeze to 84 milliseconds, and onboarding step transitions no longer drop frames.</li>
+          <li>Large Files no longer lists files from inside project folders such as node_modules, Pods, DerivedData and Gradle build output. Dev Projects already offers those folders whole, which is where deleting them actually reclaims space.</li>
+          <li>The "couldn't be cleaned" panel now checks before it explains. It says macOS protects a file only when the file is genuinely immutable or marked by System Integrity Protection, and anything it cannot explain says so and offers a retry.</li>
+          <li>Files that can never be moved to the trash, including ones whose folder is locked, are left out of Large Files rather than offered and then failed.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.3.1/Purgev1.3.1.dmg"
+        sparkle:edSignature="UquenTFr0bGe2Kn6FNCETYRF01pV6bzl/ov1JI9jGocBHkqHeU1t6jHV2K9K4cFY1SKV3Lr7QbrI0KkeMl09BQ=="
+        length="5426394"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.3.0</title>
+      <pubDate>Fri, 02 Aug 2026 12:00:00 +0000</pubDate>
+      <sparkle:version>15</sparkle:version>
+      <sparkle:shortVersionString>1.3.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li>New: Purge now detects locally downloaded AI models from Ollama and LM Studio. The scanner understands Ollama's content-addressed storage and shows one row per model named as you installed it, with only reclaimable bytes counted. Partial deletions are recoverable if they stall.</li>
+          <li>Fixed: launch freeze on Xcode systems. Purge 1.2.9 stalled at startup for users with Xcode installed due to subprocess deadlock. The DevScanner now drains pipes safely with timeouts enforced via SIGTERM escalation.</li>
+          <li>Improved: trash size accuracy now accounts for iCloud Drive and aggregates correctly across multiple trash directories.</li>
+          <li>Moved Spotlight and similar items with visible, immediate impact from Safe to Check First. These include search index rebuilds, sync reverification, and authentication re-prompts.</li>
+          <li>Enhanced deletion safety policy with identity cache protection and additional authentication-related guards.</li>
+          <li>Fixed header background rendering in the Settings view.</li>
+          <li>Improved spacing in the scan tab's Select All row.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.3.0/Purgev1.3.0.dmg"
+        sparkle:edSignature="SSFCvJ3Lrx3as02oTId6vDjmEWK0kF90QWrvJ8LtaNcHXDLgcF91YPKPTpg5LwiI/WCRtm/DO4Gn6EwfghE2Aw=="
+        length="6917608"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.2.9</title>
+      <pubDate>Sat, 25 Jul 2026 12:00:00 +0000</pubDate>
+      <sparkle:version>14</sparkle:version>
+      <sparkle:shortVersionString>1.2.9</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li>The sidebar summary is rebuilt. There are now two cards: Storage, with a used and free bar, and a reclaimable card that leads with Safe to Clean, shows how much is sitting in the trash, and gives the combined total underneath.</li>
+          <li>The clean button names the exact amount it will move instead of reading "Clean Safe Items".</li>
+          <li>Full Disk Access is handled in one place. When access is missing, the whole window waits on a single screen rather than each tab prompting separately, and it continues on its own once you turn Purge on in System Settings.</li>
+          <li>Cleaning during the first run no longer shows two success screens. Only the onboarding celebration appears.</li>
+          <li>Account and identity caches, including the Passwords, AuthKit, Apple ID and Apple Pay containers, are never offered for cleaning. Removing them caused repeated login keychain password prompts afterwards.</li>
+          <li>Cleaning says "moved to trash, not yet reclaimed" rather than reporting space freed, since nothing is reclaimed until the trash is emptied. Cleanup history records the same distinction.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.2.9/Purgev1.2.9.dmg"
+        sparkle:edSignature="4sWHD1VJcjcSa23EkpV9nl/kZKRk0xBsNF4S+RkkqtzCaU6xiw5wiqffVUH4V7CjUXEvtBFkLrX42AjAheEmCw=="
+        length="6852192"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.2.8</title>
+      <pubDate>Mon, 13 Jul 2026 12:00:00 +0000</pubDate>
+      <sparkle:version>13</sparkle:version>
+      <sparkle:shortVersionString>1.2.8</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li>New: exclude folders from scans. Pick a folder in the scan results and Purge will leave it out of future scans. Excluded folders are listed in Settings with their current size, and excluding only ever narrows what Purge looks at.</li>
+          <li>Cleanup history is now viewable in Settings. Each clean opens a detail view showing what was moved to the trash and what was skipped, along with the space freed and the item count.</li>
+          <li>Onboarding now only appears on a fresh install, not after an update. The flow is shorter and its animations respect the reduced motion setting.</li>
+          <li>Telegram media cache detection is now more reliable across different account setups.</li>
+          <li>Selecting items is easier: tapping anywhere on a row now toggles it across more of the app, and the large files action button now reads "Delete Selected".</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.2.8/Purgev1.2.8.dmg"
+        sparkle:edSignature="Eb3BXouV5IcK618hltowUY5DRzBDC7hILMZEV6FLsLfvmCTtyqr2h7opjN/oyiyph8Vd0kPZIz2ZiyGmASFsDA=="
+        length="6917995"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.2.7</title>
+      <pubDate>Wed, 08 Jul 2026 12:00:00 +0000</pubDate>
+      <sparkle:version>12</sparkle:version>
+      <sparkle:shortVersionString>1.2.7</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li>Large files list now responds to a tap anywhere on the row, not just the checkbox. Selection state reads correctly for VoiceOver too.</li>
+          <li>Deletion now runs off the main thread, keeping the app responsive during large cleans.</li>
+          <li>Reworked how updates are handled so the update check no longer hangs. Manual "check for updates" now works reliably.</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.2.7/Purgev1.2.7.dmg"
+        sparkle:edSignature="lHLZlWPFBlvtvRPnFL/5eY2QWuJ3RQgQF31HrrVl6S6IC+56m4JlkMeMD7HdsQMOR9XDHbtBYJl9qPpbnSucAw=="
+        length="6737069"
+        type="application/octet-stream" />  
+    </item>
+    <item>
+      <title>Version 1.2.6</title>
+      <pubDate>Wed, 08 Jul 2026 12:00:00 +0000</pubDate>
+      <sparkle:version>11</sparkle:version>
+      <sparkle:shortVersionString>1.2.6</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <ul>
+          <li>Telegram media cache is now detected, often tens of gigabytes of auto-downloaded photos and videos</li>
+          <li>Adobe media caches are now found, including the Premiere and After Effects media cache and Camera Raw, not just the small ones</li>
+          <li>Refined the scan list layout</li>
+          <li>Items that can't be safely cleaned no longer appear in scans</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.2.6/Purgev1.2.6.dmg"
+        sparkle:edSignature="/Exf8NHjtu5lmskWsx4DRSSMnYNnvD2b6WQtS7azrXCFzfV0pkrGADuU15gJAKhoil0M/5a/5eiRFsTn22JYCA=="
+        length="6749013"
+        type="application/octet-stream" />
+    </item>
+    <item>
+      <title>Version 1.2.4</title>
+      <pubDate>Mon, 06 Jul 2026 12:00:00 +0000</pubDate>
+      <sparkle:version>9</sparkle:version>
+      <sparkle:shortVersionString>1.2.4</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <enclosure
+        url="https://github.com/jithin-sabu/purge-app/releases/download/v1.2.4/Purgev1.2.4.dmg"
+        sparkle:edSignature="D+6VMU5XaBv5ChuF7LQRTvYSj0PUl+qp65voHXMFvXlYa0JLUWDZf5nzXZD4WIjicgGR0LqM7fN0iIOqwkEAAQ=="
+        length="5884434"
+        type="application/octet-stream" />
+    </item>
+  </channel>
+</rss>

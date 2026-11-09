@@ -1,0 +1,353 @@
+import SwiftUI
+
+/// The one place Purge asks for Full Disk Access.
+///
+/// Purge works without it (see `ScanAccess`), so this is an offer, not a gate:
+/// it says what the permission unlocks, what Purge will not do with it, and has
+/// a real way out. Onboarding shows it after the first clean; the main window
+/// shows it as a sheet from the sidebar notice and the locked tabs.
+///
+/// When access lands during onboarding, the same view runs the deeper scan and
+/// shows what the permission found, right where the user said yes. As a sheet it
+/// just closes onto the Overview, whose figures fill in as the unlocked scans run.
+struct LookDeeperView: View {
+  enum Context {
+    /// Last onboarding step. `didClean` is false when the user went to review
+    /// the list instead of cleaning, so the opening line can't say "That was".
+    case onboarding(didClean: Bool)
+    /// A sheet in the main window.
+    case sheet
+  }
+
+  let context: Context
+  /// "Not now". Onboarding finishes; the sheet closes.
+  let onNotNow: () -> Void
+  /// After the reveal in onboarding, when the user moves on. The sheet calls it as
+  /// soon as access lands.
+  let onFinished: () -> Void
+  /// When "Let Purge in" opens System Settings.
+  var onOpenSettings: () -> Void = {}
+
+  private enum Phase {
+    case asking
+    case scanning
+    case revealed(LockedPlacesFindings)
+  }
+
+  @EnvironmentObject private var store: PurgeStore
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @State private var phase: Phase = .asking
+  @State private var didOpenSettings = false
+
+  static let contentWidth: CGFloat = 620
+  /// Long enough to read "Looking deeper" even when the scan is instant.
+  private static let minimumScanDuration: Duration = .milliseconds(1500)
+
+  var body: some View {
+    Group {
+      switch phase {
+      case .asking:
+        askingBody
+      case .scanning:
+        scanningBody
+      case .revealed(let findings):
+        revealedBody(findings)
+      }
+    }
+    .frame(maxWidth: Self.contentWidth)
+    .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: phaseKey)
+    .task { await pollUntilGranted() }
+  }
+
+  /// `Phase` carries findings that are not `Equatable`; the animation only needs
+  /// to know which screen is up.
+  private var phaseKey: Int {
+    switch phase {
+    case .asking: return 0
+    case .scanning: return 1
+    case .revealed: return 2
+    }
+  }
+
+  @ViewBuilder
+  private var promises: some View {
+    LookDeeperPromise(symbol: "eye", text: String(localized: "Only cleans when you say"))
+    LookDeeperPromise(symbol: "icloud.slash", text: String(localized: "Nothing leaves your Mac"))
+    LookDeeperPromise(symbol: "trash", text: String(localized: "Everything goes to the Trash"))
+  }
+
+  private var askingBody: some View {
+    VStack(spacing: AppStyle.Spacing.large) {
+      VStack(spacing: AppStyle.Spacing.small) {
+        OnboardingStepTitle(text: String(localized: "Want Purge to look deeper?"))
+          .onboardingBlurIn(index: 0)
+
+        Text(leadText)
+          .font(AppStyle.Typography.sectionTitle.weight(.regular))
+          .foregroundStyle(AppColors.textSecondary)
+          .multilineTextAlignment(.center)
+          .fixedSize(horizontal: false, vertical: true)
+          .onboardingBlurIn(index: 1)
+      }
+
+      // What access unlocks, as tiles, then what Purge promises, as one quiet row.
+      // Each promise is something Purge does, not a limit on the permission:
+      // Full Disk Access itself can read and write, so "can't" would not be true.
+      HStack(spacing: AppStyle.Spacing.small) {
+        LookDeeperTile(symbol: "square.stack.3d.up", text: String(localized: "App Store app caches"))
+        LookDeeperTile(symbol: "doc.text.magnifyingglass", text: String(localized: "Big forgotten files"))
+        LookDeeperTile(symbol: "shippingbox", text: String(localized: "Deleted apps' leftovers"))
+      }
+      .onboardingBlurIn(index: 2)
+
+      VStack(spacing: AppStyle.Spacing.small) {
+        // One row where it fits (onboarding); stacked in the narrower sheet.
+        ViewThatFits(in: .horizontal) {
+          HStack(spacing: AppStyle.Spacing.large) { promises }
+          VStack(alignment: .leading, spacing: AppStyle.Spacing.xSmall) { promises }
+        }
+
+        Text("macOS calls this Full Disk Access. Turn it off anytime in System Settings.")
+          .font(AppStyle.Typography.metadata)
+          .foregroundStyle(AppColors.textTertiary)
+          .multilineTextAlignment(.center)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+      .onboardingBlurIn(index: 3)
+
+      VStack(spacing: AppStyle.Spacing.small) {
+        OnboardingPrimaryButton(title: String(localized: "Let Purge in"), systemImage: "arrow.up.forward", action: letPurgeIn)
+        OnboardingSecondaryButton(title: String(localized: "Not now"), action: onNotNow)
+          .keyboardShortcut(.cancelAction)
+
+        if didOpenSettings {
+          Text("Turn on Purge in System Settings, then come back. If macOS offers to reopen Purge, go ahead.")
+            .font(AppStyle.Typography.metadata)
+            .foregroundStyle(AppColors.textSecondary)
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+            .transition(.opacity)
+        }
+      }
+      .onboardingBlurIn(index: 4)
+    }
+    .transition(OnboardingTransitions.stepTransition(reduceMotion: reduceMotion))
+  }
+
+  private var scanningBody: some View {
+    VStack(spacing: AppStyle.Spacing.small) {
+      OnboardingLoadingStepTitle(baseText: String(localized: "Looking deeper"))
+      Text("Checking the places that were locked.")
+        .font(AppStyle.Typography.sectionTitle.weight(.regular))
+        .foregroundStyle(AppColors.textSecondary)
+    }
+    .transition(OnboardingTransitions.stepTransition(reduceMotion: reduceMotion))
+  }
+
+  @ViewBuilder
+  private func revealedBody(_ findings: LockedPlacesFindings) -> some View {
+    VStack(spacing: AppStyle.Spacing.large) {
+      if findings.isWorthLeadingWith {
+        VStack(spacing: 0) {
+          Text(formatBytes(findings.bytes))
+            .font(AppStyle.Typography.display.numbers)
+            .monospacedDigit()
+          Text("more to clean, from places that were locked")
+            .font(AppStyle.Typography.sectionTitle.weight(.medium))
+            .foregroundStyle(AppColors.textSecondary)
+            .multilineTextAlignment(.center)
+        }
+        .accessibilityElement(children: .combine)
+        .onboardingBlurIn(index: 0)
+
+        VStack(alignment: .leading, spacing: AppStyle.Spacing.xSmall) {
+          ForEach(Array(findings.categories.enumerated()), id: \.element.id) { index, category in
+            OnboardingResultsCategoryRow(
+              symbol: category.symbol,
+              title: category.title,
+              formattedSize: formatBytes(category.bytes)
+            )
+            .onboardingBlurIn(index: index + 1)
+          }
+        }
+        .frame(maxWidth: 300)
+
+        Text("Large Files and the uninstaller are open now too.")
+          .font(AppStyle.Typography.callout)
+          .foregroundStyle(AppColors.textSecondary)
+          .onboardingBlurIn(index: findings.categories.count + 1)
+      } else {
+        OnboardingStepTitle(text: String(localized: "Purge can see everything now"))
+          .onboardingBlurIn(index: 0)
+        Text(Self.smallFindingsMessage(findings))
+          .font(AppStyle.Typography.sectionTitle.weight(.regular))
+          .foregroundStyle(AppColors.textSecondary)
+          .multilineTextAlignment(.center)
+          .fixedSize(horizontal: false, vertical: true)
+          .onboardingBlurIn(index: 1)
+      }
+
+      OnboardingPrimaryButton(title: findings.isWorthLeadingWith ? "Show me" : "Continue") {
+        finish(with: findings)
+      }
+      .padding(.top, AppStyle.Spacing.small)
+    }
+    .transition(OnboardingTransitions.stepTransition(reduceMotion: reduceMotion))
+  }
+
+  static func smallFindingsMessage(_ findings: LockedPlacesFindings) -> String {
+    if findings.isPartial {
+      return String(localized: "Large Files and the uninstaller are ready. Purge is still checking your projects, so more may turn up.")
+    }
+    return findings.bytes > 0
+      ? String(localized: "Large Files and the uninstaller are ready, and Purge found a little more to clean too.")
+      : String(localized: "Large Files and the uninstaller are ready. Nothing big was hiding in the locked folders.")
+  }
+
+  private var leadText: String {
+    switch context {
+    case .onboarding(didClean: true):
+      return String(localized: "That was the easy part. More clutter hides in folders macOS keeps locked.")
+    case .onboarding(didClean: false), .sheet:
+      return String(localized: "Some clutter hides in folders macOS keeps locked.")
+    }
+  }
+
+  private func letPurgeIn() {
+    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
+      didOpenSettings = true
+    }
+    onOpenSettings()
+    openFullDiskAccessSettings()
+  }
+
+  /// In onboarding, "Show me" lands on the tab that holds most of what was found.
+  private func finish(with findings: LockedPlacesFindings) {
+    if case .onboarding = context, findings.isWorthLeadingWith {
+      store.selectedTab = findings.categories.first?.kind == .devArtifacts
+        ? .devTools
+        : .appCaches
+    }
+    onFinished()
+  }
+
+  /// macOS grants access to a running process without telling it, so the only way
+  /// to notice is to keep probing. Off the main actor, and only while on screen.
+  /// Also covers a relaunch: if access is already on when this appears, the
+  /// reveal starts straight away.
+  private func pollUntilGranted() async {
+    while !Task.isCancelled {
+      let granted = await store.probeFullDiskAccess()
+      if granted != store.hasFullDiskAccess {
+        store.applyFullDiskAccess(granted)
+      }
+      if granted {
+        await handleGrant()
+        return
+      }
+      do {
+        try await Task.sleep(for: .seconds(1))
+      } catch {
+        return
+      }
+    }
+  }
+
+  private func handleGrant() async {
+    // Claim the grant so a relaunch does not treat it as new.
+    store.consumeFullDiskAccessGrant()
+    guard case .onboarding = context else {
+      // The main window already queues the scans access unlocks, and the Overview
+      // shows them landing. A second screen saying the same thing is one too many.
+      store.selectedTab = .overview
+      onFinished()
+      return
+    }
+    phase = .scanning
+    let started = ContinuousClock.now
+    let findings = await store.scanLockedPlaces()
+    let remaining = Self.minimumScanDuration - (ContinuousClock.now - started)
+    if remaining > .zero {
+      try? await Task.sleep(for: remaining)
+    }
+    guard !Task.isCancelled else { return }
+    phase = .revealed(findings)
+  }
+}
+
+/// One thing access unlocks: an icon over two or three words.
+private struct LookDeeperTile: View {
+  let symbol: String
+  let text: String
+
+  var body: some View {
+    VStack(spacing: AppStyle.Spacing.xSmall) {
+      Image(systemName: symbol)
+        .font(.system(size: 20, weight: .regular))
+        .foregroundStyle(AppColors.textSecondary)
+        .frame(height: 24)
+        .accessibilityHidden(true)
+      Text(LocalizedStringKey(text))
+        .font(AppStyle.Typography.callout)
+        .multilineTextAlignment(.center)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+    .frame(maxWidth: .infinity, minHeight: 88)
+    .padding(.horizontal, AppStyle.Spacing.small)
+    .background(AppColors.surfaceCard, in: RoundedRectangle(cornerRadius: AppStyle.Radius.lg, style: .continuous))
+    .overlay {
+      RoundedRectangle(cornerRadius: AppStyle.Radius.lg, style: .continuous)
+        .stroke(AppColors.borderSubtle)
+    }
+    .accessibilityElement(children: .combine)
+  }
+}
+
+/// One promise: a small icon and a few words, in a single row with the others.
+private struct LookDeeperPromise: View {
+  let symbol: String
+  let text: String
+
+  var body: some View {
+    Label {
+      Text(LocalizedStringKey(text))
+    } icon: {
+      Image(systemName: symbol)
+        // One width for every icon, so stacked promises start their text in line.
+        .frame(width: 18)
+        .accessibilityHidden(true)
+    }
+    .font(AppStyle.Typography.callout)
+    .foregroundStyle(AppColors.textSecondary)
+    .fixedSize()
+  }
+}
+
+/// `LookDeeperView` as a sheet over the main window.
+struct LookDeeperSheet: View {
+  @EnvironmentObject private var store: PurgeStore
+  @Environment(\.dismiss) private var dismiss
+
+  /// The same width as the app's other sheets. The onboarding step is laid out for
+  /// the whole window; over the main window it would read as oversized.
+  static let width: CGFloat = 580
+  static let padding: CGFloat = AppStyle.Spacing.xLarge
+
+  var body: some View {
+    LookDeeperView(
+      context: .sheet,
+      onNotNow: { dismiss() },
+      onFinished: { dismiss() }
+    )
+    .padding(Self.padding)
+    .frame(width: Self.width)
+    .background(AppColors.surfaceBase)
+  }
+}
+
+#Preview {
+  LookDeeperView(context: .onboarding(didClean: true), onNotNow: {}, onFinished: {})
+    .environmentObject(PurgeStore())
+    .padding(AppStyle.Spacing.xLarge)
+    .frame(width: AppWindowLayout.width, height: AppWindowLayout.minHeight)
+}

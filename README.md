@@ -1,1 +1,416 @@
-# purge-memory-preview
+<div align="center">
+
+  <img src="Assets/purge-iOS-Default-1024x1024@1x.png" width="128" alt="Purge app icon" />
+
+  <h1>Purge</h1>
+
+  <p><b>Free up your Mac. Safely.</b></p>
+
+  <p>English | <a href="README.zh-CN.md">简体中文</a></p>
+
+  <p>
+    A free, open-source native Mac app that clears the cache and junk your Mac piles up on its own.<br/>
+    Files go to the Trash by default, so you can put them back.
+  </p>
+
+<p>
+  <a href="https://github.com/jithin-sabu/purge-app/actions/workflows/build.yml"><img src="https://img.shields.io/github/actions/workflow/status/jithin-sabu/purge-app/build.yml?branch=main&label=build" alt="Build status" /></a>
+  <a href="https://github.com/jithin-sabu/purge-app/blob/main/LICENSE"><img src="https://img.shields.io/github/license/jithin-sabu/purge-app?color=blue" alt="License: MIT" /></a>
+  <a href="https://github.com/jithin-sabu/purge-app/releases/latest"><img src="https://img.shields.io/github/v/release/jithin-sabu/purge-app?label=latest&color=red" alt="Latest release" /></a>
+  <a href="https://github.com/jithin-sabu/purge-app/releases"><img src="https://img.shields.io/github/downloads/jithin-sabu/purge-app/total?label=downloads&color=orange" alt="Total downloads" /></a>
+  <a href="https://github.com/jithin-sabu/purge-app/stargazers"><img src="https://img.shields.io/github/stars/jithin-sabu/purge-app?color=yellow" alt="GitHub stars" /></a>
+</p>
+
+<p>
+  <a href="https://trendshift.io/repositories/64435" target="_blank"><picture><source media="(prefers-color-scheme: dark)" srcset="https://trendshift.io/api/badge/repositories/64435?theme=dark"><img src="https://trendshift.io/api/badge/repositories/64435?theme=light" alt="jithin-sabu/purge-app | Trendshift" width="250" height="55"/></picture></a>
+</p>
+
+  <p>
+    <a href="https://github.com/jithin-sabu/purge-app/releases/latest"><b>Download</b></a>
+    &nbsp;·&nbsp;
+    <a href="#installation">Install guide</a>
+    &nbsp;·&nbsp;
+    <a href="#build-from-source">Build from source</a>
+    &nbsp;·&nbsp;
+    <a href="#security">Security</a>
+  </p>
+
+  <img src="Assets/github-hero.png" width="720" alt="Purge scanning a Mac for safe-to-clean cache" />
+
+</div>
+
+---
+
+Your Mac quietly fills up with cache and junk you never see and never asked for. Purge finds it, marks what is safe, and clears it in one click.
+
+> [!NOTE]
+> Files and folders go to the Trash by default, and Purge never empties the Trash, so you can put them back until you empty it yourself. Removed for good: iOS simulators and simulator runtimes, through Xcode's `simctl`; Time Machine local snapshots, through `tmutil` (Purge keeps the newest and the one from your last backup); the Apple Intelligence models on macOS 27, which Apple's asset service releases and Purge can download again; command-line tools and Homebrew cask apps that their package manager uninstalls, when you choose that in the review sheet. Docker Desktop's folder goes to the Trash. Purge does not run `docker system prune`.
+
+You do not need to understand any of it to use it. But if you ever want to check, every item carries a plain-language explanation and a safety label, so nothing gets touched that you cannot see and verify first.
+
+---
+
+## Features
+
+- **Memory** (⌘6) shows pressure, estimated RAM categories and grouped process footprints. Quit and Force Quit are separate, confirmed actions for recognized user applications only. Memory history and exclusions are local. The optional menu indicator and sustained-pressure notifications start off. Memory strings support English, Simplified Chinese and Russian; other screens retain their existing languages. No cache purge or automatic app closure is performed. Counter estimates and pressure observation limits are explained in the Memory page; macOS validation/performance measurements are still pending for this implementation.
+
+### Overview
+
+- **Where your space went**: one bar for the whole disk. Used, free and total come straight from the volume, so they match System Settings. App Caches, Dev Tools, Large Files, installed apps and leftovers from deleted apps each get their own segment, and the rest is shown as everything else
+- A row per category with its size and share of the disk. Click one to open its tab
+- **Everything else** opens too. Click the row and a page shows what it holds: four figures for what you can do about the space, over a map where each group is a frame with its biggest folders drawn inside, sized by space and coloured by kind. The kinds are space you free in another app (Photos, Mail, Steam, the Trash), your own files (projects, documents), what Purge leaves alone because it doesn't consider it safe to delete (caches off its list, app data no installed app claims), and what macOS manages. Point at a tile to name it, and click it to see what it is, with Show in Finder or the owning app's own way to free it. It is read only: nothing on it moves a file
+- **Scan Everything** (⇧⌘R) scans every category, one at a time so the Mac stays responsive. When you open Purge it does the same on its own. Large Files and the app scans need Full Disk Access; without it only App Caches and Dev Tools scan
+- Each byte is counted once: an app's cache folder counts under App Caches, not again under the app
+- **Apple Intelligence models** (macOS 27, Apple silicon): the on-device models macOS files under System Data, with no switch to remove them. Remove releases them through Apple's asset service and installs a profile, which you approve once, so they don't download again. Download Again removes the profile and asks macOS for the sets Purge removed, in your Siri language. The size shown is Apple's figure; Purge records what the disk really gave back
+
+### App Caches
+
+Scans `~/Library/Caches`, sandbox container caches, and common system junk:
+
+- Per-app cache folders with friendly names, brand icons, and a plain-language explanation if you want to read it
+- System Junk like application logs, crash reports, macOS installers, and leftover macOS update files
+- Large media caches from creative apps like Premiere Pro and After Effects
+- Duplicate cache locations for the same app merged into a single row
+- Results stream in as they are found
+
+### Dev Tools
+
+Three sections in one view:
+
+- **Global dev tool caches**: Xcode (Derived Data, Archives, DeviceSupport), Homebrew, npm, pnpm, Yarn, CocoaPods, Gradle, Flutter, Docker Desktop, VS Code, Cursor, JetBrains, Cargo, Terraform, and more
+- **iOS Simulators**: unused simulator runtimes grouped together (booted simulators are skipped)
+- **Developer projects**: `node_modules`, Python virtual environments, Rust `target`, Flutter build output, Xcode `Pods`, Android `.gradle`, and other artifacts grouped by project
+
+In **Settings → Developer Projects**, choose **Consider stale after** (1 month to 2 years, or Show all) to control which projects appear. Age is measured from the last time anything in the project changed, including git activity, not from the date on `node_modules` or `target`. A project in use right now, with a terminal or dev server running inside it or a git command in progress, never appears.
+
+Git worktrees made by AI coding tools (Cursor, Codex, Conductor, T3 Code, and Claude Code) appear under **Orphaned Git Worktrees** only once their repository no longer lists them. A worktree Git still uses never appears however old it is, and neither does one a terminal or agent is working inside.
+
+### Large Files
+
+Find space-hogging personal files without digging through folders:
+
+- Scans **Documents**, **Desktop**, **Downloads**, **Movies**, **Music**, and **Pictures**, plus `~/Parallels` and `~/Virtual Machines.localized` for virtual machines only, and iCloud Drive's own folder for files you can keep only in iCloud
+- A folder you moved and replaced with a link, such as `~/Documents` pointing to another drive, is scanned where the link leads when that is inside your home folder or on a drive under `/Volumes`, on a disk attached to your Mac. Its files are listed by their real path and go to that drive's Trash. A link anywhere else, such as into `~/Library/CloudStorage`, to a network share, or to a whole drive or a copy of a Mac, is not followed, and the scan says where it leads. Links inside the folders are never followed
+- Skips managed libraries (Photos, iMovie, Music, and similar), hidden folders, and project folders like `node_modules`, `Pods`, `DerivedData` and build output. Deleting a single file out of a dependency tree only breaks the install, so those belong in Dev Tools, which removes them a folder at a time
+- **Search** filters the list as you type, matching the file name, the folder it sits in, and its source label
+- Filter by **size** (5 MB to 1 GB) and **last used** (any time up to over 1 year ago)
+- Category chips for videos, audio, images, PDFs, archives, documents, AI models, virtual machines, and other files
+- **Duplicates**: a byte-for-byte scan finds identical copies, groups them together, and shows how much you'd reclaim by keeping one. A **Duplicates** chip gathers them in one place. **Keep one of each** clears a whole tab of duplicates in one go. It suggests a copy to keep per set and marks the rest for Trash, and you can move the keeper to a different copy before anything is deleted. Nothing is removed until you review and confirm
+- Sort by size, date, or name; select files and review before deleting
+- **Quick Look** preview and **Reveal in Finder** from each row
+- Deletions move files to **Trash**, so nothing is permanently erased
+- **Keep Only in iCloud** frees the space an iCloud file takes on this Mac and keeps the file in iCloud, the same as Finder's Remove Download. The **iCloud** chip lists the synced files that also use space here, with how much you'd free, and the action sits there and in each synced file's right-click menu. The file stays in its folder in Finder with a cloud mark, and opening it downloads it again. Purge offers it only for files fully uploaded to iCloud, with no sync conflict, not set to Keep Downloaded, not hard-linked, unchanged for five minutes and not open in an app, and checks all of that again just before it acts on each file. Files in iCloud Drive's own folder are never offered for the Trash, since trashing them removes them from your other devices. It is never part of Clean Safe Items or a scheduled clean
+
+Large Files is separate from cache cleanup: these are your personal files, not rebuildable caches.
+
+#### Restore images, virtual machines, and unfinished downloads
+
+Some big files carry a label that says what they are. Hover it for the full explanation.
+
+- **Restore image**: a macOS `.ipsw`, often 15 to 25 GB. It's only needed to set up a Mac, a device, or a virtual machine.
+- **Virtual machine**: a Parallels (`.pvm`), UTM (`.utm`), or VMware Fusion (`.vmwarevm`) bundle. It's one row and goes to the Trash whole, never a disk file from inside it. If the app is still installed, the label says to remove the VM there, since the app keeps its own list. A VM whose app is open, or that holds a lock file, stays off the list until you quit the app.
+- **Unfinished download**: `.crdownload`, `.part`, and Parallels' `.prlupd-part` files, and Safari's `.download` bundle when it sits directly in Downloads.
+
+#### Local AI models
+
+Downloaded models are often the largest files on a Mac and are easy to forget. They appear in Large Files under the **AI Models** category, one row per model, named the way you installed it, with the app or library that downloaded it as the location. Purge knows the stores of **Ollama**, **LM Studio**, the **Hugging Face Hub** cache (`~/.cache/huggingface/hub`, with `HF_HOME` and `HF_HUB_CACHE` honoured), swift-transformers, apps that keep models under `~/Library/Caches/huggingface`, **PyTorch Hub**, **Whisper**, **GPT4All**, **Jan**, **DiffusionBee** and **Draw Things**. Weight files over 100 MB in `~/Library/Caches`, `~/Library/Application Support` and `~/.cache` that belong to no known store are listed too, by the folder they sit in, so you can tell which app downloaded them.
+
+Purge understands Ollama's content-addressed storage, so a model's size counts only the bytes that would actually be reclaimed rather than blobs shared with another model. A Hugging Face model is its whole cache folder, so a blob two snapshots share is counted once and never removed from under the other. Models always go to the Trash and are never part of Clean Safe Items or a scheduled clean. When an app keeps its own list of installed models that Purge can't update, the row says the app may still show the model as installed.
+
+### App Uninstaller
+
+Dragging an app to the Trash leaves most of it behind: caches, preferences, containers, saved state, logs, and login helpers pile up on disk. The Uninstaller removes the app and those leftovers in one pass.
+
+- Lists the apps you installed in **Applications** and **~/Applications**, in the **Applications** folder at the top of any drive you plug in, and in folders you add under Settings > Where Purge looks for apps (or from the hint under the app list), skipping system apps and Purge itself. Each tile shows what an uninstall would free: the app bundle plus its removable leftovers
+- Select one or more apps, then review a per-app sheet that lists every item with its path and size and a safety label
+- Matching is strict, so uninstalling one app can't sweep in files shared across a vendor's apps. Exact bundle-id and app-group matches arrive checked; looser name-only matches arrive unchecked for you to confirm
+- A running app is asked to quit first, and only gracefully. If it won't, it's left installed and the rest of the batch still goes through
+- Everything confirmed moves to **Trash** through the same delete engine as the rest of Purge, so it can all come back. The one exception is an app Homebrew installed as a cask: the review sheet offers two buttons, Remove with Homebrew and Move All to Trash, and says that Homebrew deletes the app permanently and runs the cask's own uninstall steps, which can stop its background services and delete its helper tools and installer files permanently too. A cask that installs several apps is never offered to Homebrew. Its leftovers still go to the Trash, and if Homebrew refuses, the app goes to the Trash instead
+- Optional, off by default: turn on **Review leftovers when an app is deleted** in Settings. A small background watcher then notices when an app leaves one of those folders — even if Purge is quit — opens Purge with just that app's leftovers, and gets out of the way after you confirm or dismiss. Nothing moves without that review
+
+### Safety labels
+
+Purge assigns a safety label to every item it recognizes:
+
+| Label | Meaning |
+|-------|---------|
+| ✅ **Safe to Clean** | Known cache or rebuildable artifact, safe to remove |
+| ⚠️ **Check First** | May be safe, but could cause inconvenience |
+
+Filter with **All**, **Safe to Clean**, or **Check First** (⌥⌘1–⌥⌘3). Sort by size, date modified, or name.
+
+Unidentified folders are left out of the list entirely. Purge only shows what it knows about.
+
+The labels and explanations are there to be checked, not read cover to cover. Select the safe items and clean them, or open the reasoning behind any single row first. Either way is fine.
+
+### Cleaning
+
+- **Clean Selected**: pick specific rows, review in a confirmation sheet, then delete. Git and lockfile checks run first
+- **Clean Safe Files**: same safe cleanup from the menu bar
+- **Scheduled cleaning**: in **Settings → Cleaning**, turn on **Clean automatically** and choose how often (weekly, monthly, every 3 months, or a **Custom** interval you set in days, weeks, or months). Purge sends a local reminder and cleans safe items when you open the app, so the cleanup keeps happening without you thinking about it
+- Files and folders move to the **Trash**. Purge never empties the Trash. iOS simulators and simulator runtimes are removed for good through Xcode's `simctl`. Time Machine local snapshots are removed for good through `tmutil`; Purge keeps the newest and the one from your last backup. The Apple Intelligence models are released through Apple's asset service and can be downloaded again. Tools and cask apps a package manager installed are removed by that manager's own uninstall, permanently, when you pick that in the review sheet
+
+### Settings
+
+- **Appearance**: Light, Dark, or System
+- **Cleaning**: automatic safe cleanup with a frequency, the next-clean date, and a summary of the last clean
+- **Developer Projects**: stale-project threshold for developer artifact scanning
+- **Excluded from scans**: folders you've told Purge to leave alone, each with its current size. Right-click any scan result and choose **Exclude from scans** to add one. An excluded simulator runtime is listed by name and build, with the size it had when you excluded it. Excluding only ever narrows what Purge looks at
+- **Cleaning History**: every automatic and manual clean, with the space freed and the item count. Open one to see what was moved to the Trash and what was skipped
+
+### More
+
+- **First-run onboarding**: welcome, permissions (Full Disk Access and optional login item), first scan, results review, and a safe clean walkthrough
+- **Menu bar companion**: recoverable space at a glance, quick open, and scan/clean actions
+- **Disk summary**: the Overview shows used and free space; the sidebar shows what is already in the Trash, and each scan tab's size
+- **In-app updates**: the About screen checks for, downloads, and installs new versions
+
+### Keyboard shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| ⌘R | Scan the current tab (Scan Everything on the Overview) |
+| ⇧⌘R | Scan Everything, from any tab |
+| ⌘1–⌘5 | Go to Overview, App Caches, Dev Tools, Large Files, or App Uninstaller |
+| ⌘6 | Open Memory |
+| ⌥⌘1–⌥⌘3 | Filter by All, Safe to Clean, or Check First |
+| ⌘F | Search on Large Files, App Uninstaller and Memory |
+
+---
+
+## Download
+
+<div align="center">
+
+<a href="https://github.com/jithin-sabu/purge-app/releases/latest"><img src="https://img.shields.io/badge/download-Purge-2EA043?style=flat&logo=apple&logoColor=white" alt="Download Purge" /></a>
+
+</div>
+
+---
+
+## Installation
+
+There are two ways to install Purge: with Homebrew if you live in the terminal, or by downloading the app directly. Both land in the same place.
+
+### Install with Homebrew
+
+```bash
+brew install --cask purge
+```
+
+This installs Purge from the official Homebrew cask, and Homebrew verifies the download's checksum for you automatically.
+
+### Install manually
+
+The steps below walk through the direct download.
+
+#### Step 1: Download
+
+Click the download link above and download the `.dmg`.
+
+#### Step 2: Verify your download (optional but recommended)
+
+> [!TIP]
+> Since Purge deletes files, verifying the checksum confirms your download is byte-for-byte the one that was published, with nothing altered in transit.
+
+Each release includes a matching `.dmg.sha256` checksum file. Download both the `.dmg` and its `.dmg.sha256` file into the same folder, then in Terminal:
+
+```bash
+cd ~/Downloads
+shasum -a 256 -c Purgev*.dmg.sha256
+```
+
+A result ending in `OK` means the file matches the published release.
+
+#### Step 3: Install
+
+Open the `.dmg` and drag Purge to your Applications folder.
+
+#### Step 4: Open Purge
+
+Double-click Purge to open it. Purge is notarized by Apple, so it opens normally with no extra steps.
+
+#### Step 5: Grant Full Disk Access
+
+Purge needs Full Disk Access to scan your cache folders.
+
+1. Click **Open Privacy Settings** inside the app
+2. Find Purge in the list
+3. Turn on the toggle next to Purge
+4. Come back to the app and click **I've granted access**
+
+---
+
+## Updating
+
+Purge updates itself in place. Once a day it checks for a new version, and when one is available the update window appears with the release notes. Choose **Install Update** and Purge downloads it, verifies its signature, installs it, and relaunches. You don't need to visit the release page or drag anything.
+
+By default nothing is installed without your confirmation. You can also check whenever you like from the **About** screen, and if you'd rather Purge didn't check on its own, turn off **Check for updates automatically** in **Settings → Updates**.
+
+If you'd rather not be asked, turn on **Download and install updates automatically** in the same place, or tick the matching box in the update window. New versions then download in the background and install the next time Purge quits. Once one is ready, **Restart to Update** in the Purge menu, the menu bar menu or the **About** screen installs it straight away. That helps if you keep Purge in the menu bar and rarely quit it.
+
+Updates are delivered through [Sparkle](https://sparkle-project.org), the standard update framework for Mac apps outside the App Store. Each update is signed with a key that lives only on the developer's machine, and Purge refuses any download that doesn't carry a matching signature.
+
+### Updating with Homebrew
+
+If you installed through Homebrew, you can update from the terminal instead:
+
+```bash
+brew upgrade --cask purge
+```
+
+Either route is fine. Your settings, cleaning schedule, and history are kept whichever way you update; they live separately from the app. You won't need to grant Full Disk Access again either, since the permission stays with Purge.
+
+You can also browse past versions on the [releases page](https://github.com/jithin-sabu/purge-app/releases) anytime.
+
+
+---
+
+## Uninstalling
+
+Choose **Uninstall Purge…** in the Purge menu, or **Settings → Uninstall → Uninstall…**. Purge lists what it runs in the background on your Mac (the deleted-app watcher, the admin helper, the Finder right-click item, the cleanup reminder and launch at login), turns each one off and checks it really stopped, then moves itself to the Trash and quits.
+
+Your settings and cleaning history stay on your Mac, so a reinstall picks up where you left off. Tick **Also move settings and history to the Trash** to move them too. Nothing is deleted permanently; you empty the Trash when you're ready.
+
+macOS doesn't let an app remove its own Full Disk Access. If Purge had it, the last screen offers **Quit and Open Full Disk Access**. In System Settings, select Purge and click the minus button.
+
+Already dragged Purge to the Trash? Download it again, open it, and choose **Uninstall Purge…**, so nothing it ran keeps running. To check nothing is left, Purge should be gone from **System Settings → General → Login Items & Extensions**, and this should print nothing:
+
+```bash
+pgrep -fl io.getpurge
+```
+
+
+---
+
+## Build from source
+
+Prefer to build Purge yourself instead of downloading the release? Here is how.
+
+### Prerequisites
+
+- macOS 13.0 or later
+- **Xcode 26 or later** (from the Mac App Store). The project uses Swift 6.2 build settings (default actor isolation and approachable concurrency) and `@concurrent`, which need Xcode 26; earlier versions won't build it
+- [Node.js](https://nodejs.org) 18+ and npm, only needed if you want to regenerate brand icons
+
+Dependencies are resolved by Swift Package Manager when you first build. The only one is [Sparkle](https://github.com/sparkle-project/Sparkle), which handles in-app updates.
+
+### Step 1: Clone the repo
+
+```bash
+git clone https://github.com/jithin-sabu/purge-app.git
+cd purge-app
+```
+
+### Step 2: Build and run
+
+Open the project in Xcode and run:
+
+```bash
+open purge.xcodeproj
+```
+
+Then select the **purge** scheme and press **⌘R**.
+
+Or build straight from the command line:
+
+```bash
+# Build a Debug app
+xcodebuild -project purge.xcodeproj -scheme purge -configuration Debug build
+
+# Build a Release app
+xcodebuild -project purge.xcodeproj -scheme purge -configuration Release build
+```
+
+The built `Purge.app` is written under Xcode's DerivedData folder (the build output ends with its path).
+
+### Optional: regenerate brand icons
+
+The app cache icons are generated from [simple-icons](https://simpleicons.org). To rebuild them:
+
+```bash
+npm install
+npm run generate:icons
+```
+
+### Running the tests
+
+```bash
+xcodebuild test -project purge.xcodeproj -scheme purge -destination 'platform=macOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
+```
+
+The signing flags matter: without a development certificate on the machine, the test build fails before a single test runs. Continuous integration builds the same way.
+
+---
+
+## Requirements
+
+- macOS 13.0 or later
+- Full Disk Access permission
+- Xcode command-line tools (optional, for full iOS Simulator listing)
+
+---
+
+## Privacy
+
+Purge runs entirely on your Mac. Scans, explanations, manual overrides, and cleanup history stay in local Application Support. Nothing is uploaded. The last scan is saved there too, so Purge has something to show while it scans again. Nothing from Desktop, Documents, Downloads or iCloud is written to it, and Large Files keeps only its totals, by kind of file, never a file name.
+
+The one time Purge talks to the network is the update check: once a day it fetches a small XML file from GitHub to see whether a newer version is available. It sends nothing about you or your Mac, and you can turn it off in **Settings → Updates**.
+
+Purge reads some file contents, on your Mac only. To find duplicates it compares files of the same size byte for byte. To work out which app or tool a file belongs to, it reads small files such as an app's `Info.plist`, LaunchAgent plists, and the scripts that start command-line tools. It never sends file contents anywhere.
+
+Purge does not use AI. Nothing you scan or clean is sent to an AI service.
+
+---
+
+## Security
+
+Purge deletes files, so safety is the point. A few things worth knowing:
+
+- **Trash by default**: Files and folders move to the macOS Trash, and Purge never empties it. You can restore them until you empty the Trash yourself. iOS simulators and simulator runtimes are removed for good through `simctl`. Time Machine local snapshots are removed for good through `tmutil`; Purge keeps the newest and the one from your last backup. The Apple Intelligence models are released through Apple's asset service and can be downloaded again from Purge. Command-line tools and Homebrew cask apps you choose to remove through their package manager are deleted by that manager, permanently. Docker Desktop's data folder goes to the Trash. Purge does not run `docker system prune`.
+- **Allowlist-based deletion**: Only paths that match an explicit safety allowlist are ever eligible for cleanup. Anything Purge does not recognize is never touched. The [safety page](https://purgemac.com/safety) lists every allowed location and everything Purge will never touch, generated from the app's source.
+- **You choose what goes**: Purge shows what is reclaimable and you decide what to clear.
+- **Open source**: The full deletion logic, including the allowlist, is in this repo for you to read or build from source yourself.
+- **Notarized by Apple**: The app is signed and notarized, so macOS can verify it hasn't been tampered with since release.
+- **Signed updates**: In-app updates are verified against a signing key before they are installed. An update that isn't signed by that key is refused, so a compromised download can't become a compromised install.
+
+Found a safety gap or a path that could be deleted when it shouldn't be? Please report it. See [SECURITY.md](SECURITY.md) for how.
+
+---
+
+## Contributing
+
+Bug reports, safety findings, and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers how to set up the project and what makes a change easy to review. Anything touching the safety allowlist, the never-delete protections, or the scanning logic gets extra scrutiny and takes longer to review, which is deliberate.
+
+Security issues are the exception: report those privately through [SECURITY.md](SECURITY.md) rather than opening an issue.
+
+---
+
+## License
+
+Purge is released under the [MIT License](LICENSE). You are free to use, read, modify, and distribute it.
+
+---
+
+## Support
+
+Purge is free. If it saved you some disk space, you can chip in toward the running costs from the **About** screen inside the app, or directly at [Buy Me a Coffee](https://buymeacoffee.com/jithinsabu).
+
+<div align="center">
+
+<a href="https://buymeacoffee.com/jithinsabu"><img src="https://img.shields.io/badge/support-Buy_me_a_coffee-FFDD00?style=flat&logo=buymeacoffee&logoColor=white" alt="Buy me a coffee" /></a>
+
+</div>
+
+---
+
+<div align="center">
+
+**Jithin Sabu**
+
+<a href="https://jithinsabu.com"><img src="https://img.shields.io/badge/jithinsabu.com-black?style=flat&logo=safari&logoColor=white" alt="Website" /></a>
+<a href="https://linkedin.com/in/jithinsabu"><img src="https://img.shields.io/badge/LinkedIn-0A66C2?style=flat&logo=linkedin&logoColor=white" alt="LinkedIn" /></a>
+<a href="https://x.com/sabu_jithin"><img src="https://img.shields.io/badge/X-000000?style=flat&logo=x&logoColor=white" alt="X" /></a>
+<a href="mailto:jithin@purgemac.com"><img src="https://img.shields.io/badge/Email-EA4335?style=flat&logo=gmail&logoColor=white" alt="Email" /></a>
+
+</div>

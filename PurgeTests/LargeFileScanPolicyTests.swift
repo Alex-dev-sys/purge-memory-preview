@@ -1,0 +1,104 @@
+import Foundation
+import Testing
+@testable import Purge
+
+@Suite("Large file scan policy stays separate from cache safety")
+struct LargeFileScanPolicyTests {
+    private var home: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+    }
+
+    /// The gate checks the file is really there, so these make one, in a temporary
+    /// home rather than the user's own Downloads and Movies (#171).
+    @Test(arguments: ["Downloads/video.mkv", "Movies/video.mp4"])
+    func userVideoIsEligibleForLargeFileDeletion(relativePath: String) throws {
+        let fm = FileManager.default
+        let tempHome = fm.temporaryDirectory.appendingPathComponent("purge-test-home-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: tempHome) }
+        let url = tempHome.appendingPathComponent(relativePath)
+        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([0x00]).write(to: url)
+        #expect(LargeFileScanPolicy.isEligibleForDeletion(url, home: tempHome))
+    }
+
+    /// Both paths are refused by cache safety, but by different rules, and the
+    /// distinction is deliberate. `~/Movies` is a `neverDeletePrefixes` entry, so
+    /// the folder *and every descendant* are never-delete. `~/Downloads` is only a
+    /// `neverDeleteExactPaths` entry — the folder itself is protected, while a file
+    /// inside it falls through to the default refusal, `.blockedNotWhitelisted`.
+    /// That is what keeps whitelisted caches nested under Downloads reachable.
+    /// What matters for both is the same: neither is ever offered for cleanup.
+    @Test
+    func cacheSafetyStillBlocksPersonalMediaPaths() {
+        let downloads = home.appendingPathComponent("Downloads/movie.mkv")
+        let movies = home.appendingPathComponent("Movies/movie.mp4")
+
+        #expect(DeletionSafetyPolicy.evaluate(downloads) == .blockedNotWhitelisted)
+        #expect(DeletionSafetyPolicy.evaluate(movies) == .blockedNeverDelete)
+        #expect(DeletionSafetyPolicy.evaluate(home.appendingPathComponent("Downloads")) == .blockedNeverDelete)
+        #expect(!DeletionSafetyPolicy.isOfferedForCleanup(downloads))
+        #expect(!DeletionSafetyPolicy.isOfferedForCleanup(movies))
+    }
+
+    @Test
+    func libraryPathsAreNotEligibleForLargeFileDeletion() {
+        let url = home.appendingPathComponent("Library/Caches/com.example.app/cache.db")
+        #expect(!LargeFileScanPolicy.isEligibleForDeletion(url))
+    }
+
+    @Test
+    func photosLibraryDescendantsAreExcluded() {
+        let url = home
+            .appendingPathComponent("Pictures/Photos Library.photoslibrary/originals/photo.jpg")
+        #expect(!LargeFileScanPolicy.isEligibleForDeletion(url))
+    }
+
+    /// Both of these were listed individually in Large Files. They are project
+    /// dependencies restored by `npm install` / `pod install`, and Dev Projects
+    /// already offers the folders that hold them.
+    @Test(arguments: [
+        "Documents/purge-landing-page/node_modules/@next/swc-darwin-arm64/next-swc.darwin-arm64.node",
+        "Documents/app/ios/Pods/hermes-engine-artifacts/hermes-ios-0.79.6-release.tar.gz",
+        "Documents/api/vendor/github.com/some/dep/blob.bin",
+        "Documents/rust-app/target/release/binary",
+        "Documents/py/venv/lib/site-packages/torch/lib/libtorch.dylib",
+        "Desktop/old-project/node_modules/esbuild/bin/esbuild",
+        // Xcode's SwiftPM checkout — a bare git repo of .pack files.
+        "Documents/app/build/SourcePackages/repositories/GRDB.swift-dd0599db/objects/pack/pack-030a.pack",
+        // Gradle build output: stripped native libs and React Native source maps.
+        "Documents/app/android/app/build/intermediates/merged_native_libs/debug/out/lib/arm64-v8a/libreactnative.so",
+        "Documents/app/android/app/build/intermediates/sourcemaps/react/release/index.android.bundle.map",
+        "Documents/app/build/Debug/MyApp.app/Contents/MacOS/MyApp",
+    ])
+    func projectDependencyFilesAreNotOfferedAsLargeFiles(relativePath: String) {
+        let url = home.appendingPathComponent(relativePath)
+        #expect(LargeFileScanPolicy.isInsideExcludedDirectory(url))
+        #expect(!LargeFileScanPolicy.isEligibleForDeletion(url))
+    }
+
+    @Test(arguments: ["node_modules", "Pods", "vendor", "target", "__pycache__", "build", "SourcePackages"])
+    func projectArtifactDirectoriesAreNotDescendedInto(folderName: String) {
+        let url = home.appendingPathComponent("Documents/project/\(folderName)")
+        #expect(LargeFileScanPolicy.isExcludedDirectory(url))
+    }
+
+    /// The exclusion must not swallow the files Large Files exists to show.
+    @Test(arguments: [
+        "Downloads/Xcode_16.dmg",
+        "Documents/vendor-contract-scan.pdf",
+        "Movies/target-practice.mov",
+        "Pictures/node-conference-photo.jpg",
+    ])
+    func ordinaryUserFilesAreStillOffered(relativePath: String) {
+        let url = home.appendingPathComponent(relativePath)
+        #expect(!LargeFileScanPolicy.isInsideExcludedDirectory(url))
+    }
+
+    @Test
+    func scanRootsCoverUserContentFolders() {
+        let roots = LargeFileScanPolicy.scanRoots(home: home).map(\.lastPathComponent)
+        #expect(roots.contains("Downloads"))
+        #expect(roots.contains("Movies"))
+        #expect(roots.contains("Documents"))
+    }
+}

@@ -1,0 +1,227 @@
+import Foundation
+
+nonisolated enum CleanupTrigger: String, Codable, Hashable {
+    case manual
+    case scheduled
+}
+
+struct CleanupHistoryDeletedItemDTO: Codable, Hashable, Identifiable {
+    var id: String { path }
+
+    let path: String
+    /// Bytes recorded before deletion.
+    let sizeBytes: Int64
+    /// `false` for an item deleted permanently instead of moved to the Trash, as
+    /// simulators and runtimes are through `simctl`. Absent before #170.
+    let movedToTrash: Bool?
+
+    init(path: String, sizeBytes: Int64, movedToTrash: Bool? = nil) {
+        self.path = path
+        self.sizeBytes = sizeBytes
+        self.movedToTrash = movedToTrash
+    }
+
+    /// Entries written before #170 don't say, so a path the engine only ever deletes
+    /// permanently counts as deleted: a simulator device folder, or anything under
+    /// the system's `/Library/Developer/CoreSimulator`, where only runtimes live and
+    /// nothing is offered for the Trash.
+    var wentToTrash: Bool {
+        if let movedToTrash { return movedToTrash }
+        if path.hasPrefix("/Library/Developer/CoreSimulator/") { return false }
+        return !FileDeleter.removesDirectly(URL(fileURLWithPath: path), simulatorRuntimePaths: [])
+    }
+}
+
+struct CleanupHistorySkippedItemDTO: Codable, Hashable, Identifiable {
+    var id: String { path }
+
+    let path: String
+    let reason: String
+    let isUserVisible: Bool
+}
+
+/// An item the clean tried and could not remove (#303). A record of that clean:
+/// a later Retry is not written to History, so the item may be gone since.
+struct CleanupHistoryFailedItemDTO: Codable, Hashable, Identifiable {
+    var id: String { path }
+
+    let path: String
+    /// Bytes recorded before the attempt.
+    let sizeBytes: Int64
+    /// A `CleanFailureReason` raw value.
+    let reason: String
+
+    init(path: String, sizeBytes: Int64, reason: CleanFailureReason) {
+        self.path = path
+        self.sizeBytes = sizeBytes
+        self.reason = reason.rawValue
+    }
+
+    /// A reason a newer version saved reads as unknown.
+    var failureReason: CleanFailureReason {
+        CleanFailureReason(rawValue: reason) ?? .unknown
+    }
+}
+
+/// What a history entry removed, when it was not an ordinary clean. Absent on
+/// every entry written before this existed, and on ordinary cleans since.
+nonisolated enum CleanupHistoryKind: String, Codable, Hashable {
+    /// The Apple Intelligence models, released through Apple's asset service.
+    /// `deletedItems` holds one item per set with Apple's figure for it;
+    /// `bytesReclaimedOnVolume` is what the volume gave back (#133).
+    case appleIntelligenceModels
+    /// Downloads of iCloud files removed from this Mac (#106). Nothing went to
+    /// the Trash and every file is still in iCloud. `deletedItems` holds each
+    /// file with the space it freed here, measured.
+    case iCloudDownloadsRemoved
+}
+
+/// One persisted cleanup session (manual or scheduled).
+struct CleanupHistoryEntry: Codable, Identifiable, Hashable {
+    var id: UUID
+    let date: Date
+    let trigger: CleanupTrigger
+    let kind: CleanupHistoryKind?
+    /// Sum of the sizes of items moved to the trash. Pending, not reclaimed.
+    let bytesMovedToTrash: Int64
+    /// Measured volume delta, present only when it was actually measured and cleared
+    /// measurement noise. `nil` means unmeasured and must render as unknown: never
+    /// substitute `bytesMovedToTrash` here.
+    let bytesReclaimedOnVolume: Int64?
+    let deletedItems: [CleanupHistoryDeletedItemDTO]
+    let skippedItems: [CleanupHistorySkippedItemDTO]
+    /// Empty on entries written before #303, which did not keep them.
+    let failedItems: [CleanupHistoryFailedItemDTO]
+
+    init(
+        id: UUID = UUID(),
+        date: Date = Date(),
+        trigger: CleanupTrigger,
+        bytesMovedToTrash: Int64,
+        bytesReclaimedOnVolume: Int64? = nil,
+        deletedItems: [CleanupHistoryDeletedItemDTO],
+        skippedItems: [CleanupHistorySkippedItemDTO] = [],
+        failedItems: [CleanupHistoryFailedItemDTO] = [],
+        kind: CleanupHistoryKind? = nil
+    ) {
+        self.id = id
+        self.date = date
+        self.trigger = trigger
+        self.kind = kind
+        self.bytesMovedToTrash = bytesMovedToTrash
+        self.bytesReclaimedOnVolume = bytesReclaimedOnVolume
+        self.deletedItems = deletedItems
+        self.skippedItems = skippedItems
+        self.failedItems = failedItems
+    }
+
+    /// An ordinary clean's items, split by where they went (#170).
+    /// Empty for removed iCloud downloads, which neither went to the Trash nor
+    /// were deleted.
+    var trashedItems: [CleanupHistoryDeletedItemDTO] {
+        guard kind != .iCloudDownloadsRemoved else { return [] }
+        return deletedItems.filter(\.wentToTrash)
+    }
+
+    var permanentlyDeletedItems: [CleanupHistoryDeletedItemDTO] {
+        guard kind != .iCloudDownloadsRemoved else { return [] }
+        return deletedItems.filter { !$0.wentToTrash }
+    }
+
+    /// Space the removed iCloud downloads freed on this Mac, measured per file.
+    /// Zero for every other kind of entry.
+    var bytesFreedByRemovedDownloads: Int64 {
+        guard kind == .iCloudDownloadsRemoved else { return 0 }
+        return deletedItems.reduce(Int64(0)) { $0 + $1.sizeBytes }
+    }
+
+    /// The sizes the scan recorded for the items deleted permanently. Not in
+    /// `bytesMovedToTrash`, which only counts what went to the Trash.
+    var bytesDeletedPermanently: Int64 {
+        permanentlyDeletedItems.reduce(Int64(0)) { $0 + $1.sizeBytes }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, date, trigger, bytesMovedToTrash, bytesReclaimedOnVolume, deletedItems, skippedItems, failedItems, kind
+        /// Pre-measurement field. Held a sum of moved sizes that was labelled as freed
+        /// space, so it decodes into `bytesMovedToTrash` and never into reclaimed.
+        case totalFreedBytes
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.date = try container.decode(Date.self, forKey: .date)
+        self.trigger = try container.decode(CleanupTrigger.self, forKey: .trigger)
+        // An unknown kind from a newer version decodes as nil rather than failing the entry.
+        self.kind = try? container.decodeIfPresent(CleanupHistoryKind.self, forKey: .kind)
+        if let moved = try container.decodeIfPresent(Int64.self, forKey: .bytesMovedToTrash) {
+            self.bytesMovedToTrash = moved
+        } else {
+            self.bytesMovedToTrash = try container.decode(Int64.self, forKey: .totalFreedBytes)
+        }
+        self.bytesReclaimedOnVolume = try container.decodeIfPresent(Int64.self, forKey: .bytesReclaimedOnVolume)
+        self.deletedItems = try container.decode([CleanupHistoryDeletedItemDTO].self, forKey: .deletedItems)
+        self.skippedItems = try container.decodeIfPresent([CleanupHistorySkippedItemDTO].self, forKey: .skippedItems) ?? []
+        self.failedItems = try container.decodeIfPresent([CleanupHistoryFailedItemDTO].self, forKey: .failedItems) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(date, forKey: .date)
+        try container.encode(trigger, forKey: .trigger)
+        try container.encodeIfPresent(kind, forKey: .kind)
+        try container.encode(bytesMovedToTrash, forKey: .bytesMovedToTrash)
+        try container.encodeIfPresent(bytesReclaimedOnVolume, forKey: .bytesReclaimedOnVolume)
+        try container.encode(deletedItems, forKey: .deletedItems)
+        try container.encode(skippedItems, forKey: .skippedItems)
+        try container.encode(failedItems, forKey: .failedItems)
+    }
+}
+
+struct CleanupHistoryFile: Codable {
+    /// Newest-first list; capped at entry limit.
+    var entries: [CleanupHistoryEntry]
+
+    init(entries: [CleanupHistoryEntry] = []) {
+        self.entries = entries
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case entries
+    }
+
+    /// Skips an entry it cannot read instead of failing the whole file. A failed
+    /// file loads as empty and the next clean overwrites it, which would lose every
+    /// clean an older version recorded, and those feed the yearly ledger.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        var list = try container.nestedUnkeyedContainer(forKey: .entries)
+        var entries: [CleanupHistoryEntry] = []
+        while !list.isAtEnd {
+            if let entry = try? list.decode(CleanupHistoryEntry.self) {
+                entries.append(entry)
+            } else if (try? list.decode(SkippedEntry.self)) == nil {
+                break
+            }
+        }
+        self.entries = entries
+    }
+
+    /// Decodes nothing, which moves the list past an unreadable entry.
+    private struct SkippedEntry: Decodable {
+        init(from decoder: Decoder) throws {}
+    }
+
+    mutating func append(_ entry: CleanupHistoryEntry, maxEntries: Int) {
+        entries.insert(entry, at: 0)
+        if entries.count > maxEntries {
+            entries = Array(entries.prefix(maxEntries))
+        }
+    }
+
+    mutating func clear() {
+        entries.removeAll()
+    }
+}

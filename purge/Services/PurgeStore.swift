@@ -1,0 +1,6105 @@
+import AppKit
+import Foundation
+import SwiftUI
+import Combine
+
+/// Holds large-file selection separately from the `largeFiles` array so a toggle
+/// only re-renders the views observing this object (rows, select-all bar, delete
+/// button) — never the results List container, whose re-render reverts scroll.
+@MainActor
+final class LargeFileSelection: ObservableObject {
+    @Published var ids: Set<String> = []
+}
+
+/// Duplicate groups found among the Large Files results, kept in its own
+/// observable for the same reason as `LargeFileSelection`: rows and chips can
+/// observe it without the results List container re-rendering.
+///
+/// `index` is assigned exactly once per pass, when the whole pass finishes,
+/// rather than streamed group by group. That keeps the number of re-renders of
+/// `LargeFilesView` (which owns the chip counts) to one, and `isChecking` covers
+/// the wait in the meantime.
+@MainActor
+final class LargeFileDuplicateIndex: ObservableObject {
+    @Published private(set) var index = DuplicateIndex.empty
+    @Published private(set) var isChecking = false
+
+    /// Exposed so `LargeFilesView` can mirror the index into `@State` and
+    /// re-render on the one assignment per pass, rather than observing the whole
+    /// object and re-rendering the results List on every `isChecking` flip too.
+    var indexPublisher: AnyPublisher<DuplicateIndex, Never> {
+        $index.eraseToAnyPublisher()
+    }
+
+    func beginChecking() {
+        index = .empty
+        isChecking = true
+    }
+
+    func finish(with index: DuplicateIndex) {
+        self.index = index
+        isChecking = false
+    }
+
+    func cancelChecking() {
+        isChecking = false
+    }
+
+    func reset() {
+        index = .empty
+        isChecking = false
+    }
+
+    /// Drops rows a delete removed, and any group left with a single copy.
+    func removeFiles(ids removed: Set<String>) {
+        guard !removed.isEmpty, !index.isEmpty else { return }
+        index = index.removing(fileIDs: removed)
+    }
+}
+
+/// One duplicate set in the cleanup review: its copies and the keeper suggested
+/// for them. `id` is the group id, so the sheet can key its per-set keeper choice.
+nonisolated struct DuplicateCopySet: Identifiable {
+    let id: String
+    let copies: [LargeFile]
+    let suggestedKeeperID: String
+}
+
+/// A pending "keep one of each, delete the rest" review across every duplicate
+/// set. `id` is derived from the sets so `.sheet(item:)` doesn't re-present the
+/// same review, but changes when the sets do (a scan or an earlier delete).
+nonisolated struct DuplicateCleanupRequest: Identifiable {
+    let sets: [DuplicateCopySet]
+    var id: String { sets.map(\.id).joined(separator: "|") }
+}
+
+/// Files the user asked to remove the downloads of, awaiting confirmation (#106).
+nonisolated struct RemoveDownloadRequest: Identifiable {
+    let id = UUID()
+    let files: [LargeFile]
+    /// Selected files left out because they are only on this Mac, so the sheet
+    /// accounts for every file the user ticked.
+    var localOnlyCount = 0
+    /// Selected synced files left out because the scan found them not ready:
+    /// uploading, recently changed, set to Keep Downloaded, or in conflict.
+    var notReadyCount = 0
+    /// False when the request came from one row's menu, where the rest of the
+    /// selection has nothing to do with it.
+    var fromSelection = true
+}
+
+/// What a Remove Download did, for the result sheet.
+nonisolated struct RemoveDownloadResult: Identifiable {
+    var id: UUID { report.id }
+    let report: ICloudDownloadReport
+    /// Rows still ticked afterwards. The run leaves them selected, and the
+    /// sheet says so, so a later Delete Selected doesn't come as a surprise.
+    let stillSelectedCount: Int
+}
+
+/// Scan-tab selection (app caches, dev tools, simulators, project artifacts) kept in
+/// its own observable, held as a plain `let` on the store (NOT @Published), so a
+/// toggle re-renders only the views that display selection — never the results List
+/// container, whose re-render reverts the scroll position. Keyed by stable id so it
+/// survives the metadata-update passes that rebuild the item structs.
+@MainActor
+final class ScanSelection: ObservableObject {
+    @Published var cacheIDs: Set<String> = []
+    @Published var devToolIDs: Set<String> = []
+    @Published var simulatorIDs: Set<UUID> = []
+    @Published var simulatorRuntimeIDs: Set<String> = []
+    @Published var artifactIDs: Set<String> = []
+
+    func removeAll() {
+        cacheIDs.removeAll()
+        devToolIDs.removeAll()
+        simulatorIDs.removeAll()
+        simulatorRuntimeIDs.removeAll()
+        artifactIDs.removeAll()
+    }
+}
+
+@MainActor
+final class PurgeStore: ObservableObject {
+    private enum StorageKeys {
+        /// Key name predates the trash-pending model and is load-bearing for
+        /// `FirstRunGate`'s reset list; the value it holds is bytes moved to trash.
+        static let totalMovedToTrashBytes = "totalRecoveredBytes"
+        static let lastScanCompletedAt = "lastScanCompletedAt"
+        static let lastScanSafeRecoverableBytes = "lastScanSafeRecoverableBytes"
+    }
+
+    enum Tab: String, CaseIterable, Identifiable {
+        case overview = "Overview"
+        case appCaches = "App Caches"
+        case devTools = "Dev Tools"
+        case largeFiles = "Large Files"
+        case uninstaller = "App Uninstaller"
+        case memory = "Memory"
+        case settings = "Settings"
+        case about = "About"
+
+        var id: String { rawValue }
+        var displayName: String {
+            if self == .memory { return memoryText("Memory") }
+            return NSLocalizedString(rawValue, comment: "Sidebar tab title")
+        }
+        var icon: String {
+            switch self {
+            case .overview: return "square.grid.2x2"
+            case .appCaches: return "internaldrive"
+            case .devTools: return "hammer"
+            case .largeFiles: return "tray.full"
+            case .uninstaller: return "trash"
+            case .memory: return "memorychip"
+            case .settings: return "gearshape"
+            case .about: return "info.circle"
+            }
+        }
+
+        /// The sidebar groups the scan tabs by what Purge may do with what they find:
+        /// caches it can clean, and the user's own things it only helps review.
+        static let cleanTabs: [Tab] = [.appCaches, .devTools]
+        static let reviewTabs: [Tab] = [.largeFiles, .uninstaller, .memory]
+        static let utilityTabs: [Tab] = [.settings, .about]
+
+        /// The tabs ⌘1 … ⌘6 switch to, preserving the original first five shortcuts.
+        static let keyboardTabs: [Tab] = [.overview] + cleanTabs + reviewTabs
+    }
+
+    enum ScanPhase: Equatable {
+        case idle
+        case scanning
+        case cancelling
+        case completed
+    }
+
+    struct DeletionCandidate: Identifiable, Hashable {
+        var id: String { path.path }
+        let title: String
+        let path: URL
+        let sizeBytes: Int64
+        let safetyInfo: SafetyInfo
+        let reinstallCommand: String?
+        let subtitle: String?
+        var reinstallSafety: ReinstallSafetyStatus
+        var gitStatus: GitWorktreeStatus
+        /// Set on a simulator runtime row, so the clean can check the runtime
+        /// exclusion list after the row itself is gone (#178).
+        var simulatorRuntime: SimulatorRuntimeHandle? = nil
+
+        var formattedSize: String { formatBytes(sizeBytes) }
+
+        var needsReinstallFriction: Bool { reinstallSafety == .missingLockfile }
+        var needsUncommittedGitFriction: Bool { gitStatus == .dirty }
+
+        static func deletionCandidates(forCache item: CacheItem) -> [DeletionCandidate] {
+            item.locations.map { location in
+                DeletionCandidate(
+                    title: CacheHeadline.localized(item.appName, cacheFolder: item.path.lastPathComponent, appFolder: item.bundleID),
+                    path: location.path,
+                    sizeBytes: location.sizeBytes,
+                    safetyInfo: item.safetyInfo,
+                    reinstallCommand: item.safetyInfo.reinstallCommand,
+                    subtitle: cacheLocationLabel(location),
+                    reinstallSafety: PurgeStore.cacheReinstallStatus(forPath: location.path),
+                    gitStatus: item.gitStatus
+                )
+            }
+        }
+
+        /// The line under a cache folder's title in the confirm sheets. An app's
+        /// Application Support cache folders share one row and one title (#231), so
+        /// each shows its path inside the app's folder, like `GPUCache` or
+        /// `Crashpad/completed`. Every other location keeps its folder key.
+        static func cacheLocationLabel(_ location: CacheLocation) -> String {
+            let components = location.path.pathComponents
+            guard let index = components.indices.dropLast(2).first(where: {
+                components[$0] == "Library"
+                    && components[$0 + 1] == "Application Support"
+                    && components[$0 + 2] == location.folderName
+            }), index + 3 < components.count else { return location.folderName }
+            return components[(index + 3)...].joined(separator: "/")
+        }
+    }
+
+    @Published var selectedTab: Tab = .overview {
+        didSet {
+            if selectedTab != safetyFilterVisitTab { safetyFilterVisitTab = nil }
+        }
+    }
+    /// The tab the Overview opened on Safe for this one visit, without saving Safe as
+    /// that tab's filter. Leaving the tab or picking a filter ends the visit.
+    @Published private(set) var safetyFilterVisitTab: Tab?
+    @Published var cacheItems: [CacheItem] = [] {
+        didSet {
+            invalidateSafeCleanupSummary()
+            cacheItemsRevision &+= 1
+            categoryInputsDidChange()
+            lastScanListDidChange(.appCaches)
+        }
+    }
+    /// Cheap stand-in for "the set of cache rows changed", for use as an
+    /// `.animation(_:value:)` key — see `largeFilesRevision` for the same pattern.
+    @Published private(set) var cacheItemsRevision = 0
+    @Published var devTools: [DevTool] = [] {
+        didSet {
+            invalidateSafeCleanupSummary()
+            categoryInputsDidChange()
+            lastScanListDidChange(.devTools)
+        }
+    }
+    @Published var simulatorDevices: [SimulatorDevice] = [] {
+        didSet {
+            categoryInputsDidChange()
+            lastScanListDidChange(.simulators)
+        }
+    }
+    /// Simulators that are not shut down (booted, booting, shutting down, being
+    /// created), shown without a checkbox so the space they take is not a
+    /// mystery. Never selected, never counted as recoverable, never deleted.
+    @Published var runningSimulatorDevices: [SimulatorDevice] = [] {
+        didSet { confirmLastScanRows(.simulators) }
+    }
+    /// Runtime images the simulators boot from. Sized by `simctl` on arrival, so
+    /// there is no staged set; removed through `simctl runtime delete`, never
+    /// trashed, so never part of the one-click safe clean or a scheduled clean.
+    @Published var simulatorRuntimes: [SimulatorRuntime] = [] {
+        didSet {
+            categoryInputsDidChange()
+            lastScanListDidChange(.runtimes)
+        }
+    }
+    @Published var projectGroups: [ProjectGroup] = [] {
+        didSet {
+            invalidateSafeCleanupSummary()
+            categoryInputsDidChange()
+            lastScanListDidChange(.projects)
+        }
+    }
+    @Published var largeFiles: [LargeFile] = [] {
+        didSet {
+            largeFilesRevision &+= 1
+            categoryInputsDidChange()
+        }
+    }
+    /// Cheap stand-in for "the set of large-file rows changed", for use as an
+    /// `.animation(_:value:)` key. The list previously animated on
+    /// `largeFiles.map(\.id)`, which allocated and then compared an array of every
+    /// row's path string on each body evaluation; this is O(1) and, being driven from
+    /// `didSet`, also catches in-place edits that an id list would miss.
+    @Published private(set) var largeFilesRevision = 0
+    /// What the last Large Files scan looked at and left off the list (#230).
+    /// Nil until a scan finishes; a scan that was cancelled leaves none.
+    @Published var largeFileScanSummary: LargeFileScanSummary?
+    /// The Large Files chip the user picked: All, Duplicates, iCloud or a
+    /// category's raw value. Held here and never saved, so each launch and each
+    /// Large Files scan starts on All (#277). The list filters on
+    /// `LargeFileCategoryFilter.activeRawValue`, which is All while this chip
+    /// has no rows.
+    @Published var largeFileCategoryFilter = LargeFileCategoryFilter.all
+    /// Large-file selection lives in its own observable object (NOT @Published on the
+    /// store) so toggling a row does not fire the store's objectWillChange and thus
+    /// does not re-render the results List container — a List re-render reverts the
+    /// scroll position. Only views that display selection (rows, select-all bar,
+    /// delete button) observe this object directly.
+    let largeFileSelection = LargeFileSelection()
+    /// Duplicate groups among `largeFiles`, likewise in its own observable so the
+    /// badges and the Duplicates chip can update without re-rendering the List.
+    let largeFileDuplicates = LargeFileDuplicateIndex()
+    /// See `ScanSelection` — decoupled selection for the App Caches / Dev Tools tabs.
+    let scanSelection = ScanSelection()
+    @Published var isScanningLargeFiles = false
+    @Published var showLargeFileDeletionSheet = false
+    /// The duplicate-cleanup review awaiting confirmation, or nil when closed.
+    /// Drives a `.sheet(item:)`.
+    @Published var pendingDuplicateCleanup: DuplicateCleanupRequest?
+    /// The Remove Download review awaiting confirmation, or nil when closed (#106).
+    @Published var pendingRemoveDownload: RemoveDownloadRequest?
+    /// What the last Remove Download did, shown until the user closes it.
+    @Published var removeDownloadResult: RemoveDownloadResult?
+    /// Replaced in tests with one that evicts nothing real.
+    var iCloudDownloadRemover = ICloudDownloadRemover()
+
+    // MARK: Uninstaller (issue #45)
+
+    /// Apps the picker offers, as selectable tiles. Order is decided in the
+    /// view (alphabetical by default); this array is not pre-sorted by size.
+    @Published var installedApps: [InstalledApp] = [] {
+        didSet {
+            categoryInputsDidChange()
+            lastScanListDidChange(.apps)
+            appSuiteInputsDidChange()
+        }
+    }
+    @Published var isScanningInstalledApps = false
+    @Published private(set) var hasCompletedInstalledAppsScan = false
+    /// The app folders the app list was last read with (#99).
+    var lastAppFolderRoots: [String] = []
+    /// What the header needs to say where the listed apps come from (#99):
+    /// the folders read now, the ones the user added, and drive names. Read
+    /// off the main thread with each app scan, so no render asks the disk.
+    @Published var appFolderPaths = AppFolderPaths() {
+        didSet { if appFolderPaths != oldValue { appSuiteInputsDidChange() } }
+    }
+    /// Apps from one vendor that share a folder, shown as one entry in the list
+    /// (#155). Display only: every member stays in `installedApps`. Rebuilt off
+    /// the main thread when the list or its folders change.
+    @Published var appSuiteGroups: [AppSuiteGroup] = []
+    /// Signing team per nested bundle path, "" when unsigned or unreadable, so a
+    /// rebuild reads each signature once.
+    var appTeamIDByPath: [String: String] = [:]
+    /// Reads a bundle's signing team. Replaced in tests with fixed teams.
+    var appTeamIDReader: @Sendable (URL) -> String? = { CodeSignature.read(at: $0)?.teamID }
+    /// The group whose tray is open in the uninstaller's grid, one at a time.
+    @Published var openGridAppGroupID: String?
+    /// The groups opened in the uninstaller's list.
+    @Published var expandedListAppGroupIDs: Set<String> = []
+    /// What the groups were last built from.
+    var appSuiteInputs = AppSuiteInputs()
+    /// The rebuild in flight, cancelled when a newer one starts.
+    var appSuiteGroupingTask: Task<Void, Never>?
+    /// Opens an app, such as a suite's own uninstaller. Replaced in tests.
+    var appLauncher: (URL) -> Void = { url in
+        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+    }
+    /// Bundle-plus-safe-leftover total per app id, filled in the background after
+    /// the list loads. Absent until measured; callers fall back to bundle size.
+    @Published private(set) var removableBytesByAppID: [String: Int64] = [:] {
+        didSet {
+            categoryInputsDidChange()
+            lastScanListDidChange(.apps)
+        }
+    }
+    /// Every path counted in an app's total, with its size, so the Overview can
+    /// count a file once when another category (usually App Caches) found it too.
+    /// Written just before `removableBytesByAppID`, whose publish covers both.
+    private(set) var appFootprintItemsByAppID: [String: [OverviewSizedItem]] = [:]
+    /// True while the background pass that fills `removableBytesByAppID` runs.
+    @Published private(set) var isMeasuringRemovableTotals = false
+    /// Apps the user has ticked in the picker, keyed by `InstalledApp.id`.
+    @Published var selectedAppIDs: Set<String> = []
+    /// True while leftovers for the selected apps are being gathered ahead of the
+    /// review sheet.
+    @Published var isBuildingUninstallPlan = false
+    /// The reviewed removal, one entry per selected app, awaiting confirmation.
+    /// Drives the review sheet via `.sheet(item:)`; nil when closed.
+    @Published var uninstallPlan: UninstallPlan?
+
+    // MARK: Orphan leftovers (issue #26)
+
+    /// Which view the App Uninstaller tab is showing. Lifted into the store so the
+    /// tab's header can swap its action button (Uninstall vs Remove leftovers) to
+    /// match the segment the user is on.
+    @Published var uninstallSection: UninstallSection = .installedApps
+
+    /// An app the Uninstall an App intent asked to see. `UninstallView` puts its
+    /// name in the search box, then clears this.
+    @Published var uninstallerFocus: UninstallerFocus?
+
+    /// Leftovers whose owning app is no longer installed, shown as a section under
+    /// the App Uninstaller tab. Always "Check First", never preselected.
+    @Published var orphanLeftovers: [UninstallItem] = [] {
+        didSet {
+            categoryInputsDidChange()
+            lastScanListDidChange(.leftovers)
+        }
+    }
+    @Published var isScanningOrphans = false
+    @Published private(set) var hasCompletedOrphanScan = false
+    /// Orphan rows the user has ticked, keyed by `UninstallItem.id` (its path).
+    @Published var orphanSelectedIDs: Set<String> = []
+    /// The reviewed orphan removal awaiting confirmation. Drives the review sheet
+    /// via `.sheet(item:)`; nil when closed.
+    @Published var orphanCleanupPlan: OrphanCleanupPlan?
+    /// Leftovers of an app removed outside Purge, awaiting review (issue #65).
+    /// Set by `RemovedAppMonitor`; drives its sheet in `ContentView`.
+    @Published var removedAppLeftoverPlan: RemovedAppLeftoverPlan?
+
+    // MARK: Command-line tools (#225)
+
+    /// Standalone installs and package-manager tools, shown as the uninstaller's
+    /// third section. Every row is Check First and never preselected; a
+    /// package-manager row is removed by its manager, not by Purge.
+    @Published var commandLineTools = CommandLineToolScanResult()
+    @Published var isScanningCommandLineTools = false
+    @Published private(set) var hasCompletedCommandLineToolScan = false
+    /// Rows the user has ticked, both kinds, keyed by `id`.
+    @Published var commandLineToolSelectedIDs: Set<String> = []
+    /// The ticked tools, both kinds, from review to done. Drives one sheet.
+    @Published var commandLineToolRemovalPlan: CommandLineToolRemovalPlan?
+    /// Best-effort git status keyed by standardized tool path (`URL.path`).
+    @Published private(set) var devToolRepoStatusByPath: [String: GitWorktreeStatus] = [:] {
+        didSet { invalidateSafeCleanupSummary() }
+    }
+    @Published var isScanningGeneral = false
+    @Published var isScanningDeveloper = false
+    @Published private(set) var isScanningProjects = false
+    @Published private(set) var isScanningAll = false
+    @Published private(set) var isEnrichingGeneral = false
+    @Published private(set) var isEnrichingDeveloper = false
+    /// How many Dev Tools git passes are running. A full scan's project
+    /// discovery can run its pass while the Dev Tools pass still runs, so the
+    /// flag above stays on until both end.
+    private var developerEnrichmentCount = 0 {
+        didSet { isEnrichingDeveloper = developerEnrichmentCount > 0 }
+    }
+    /// Which half of the App Caches and Dev Tools scan is running. The flags above
+    /// drop for a moment between that scan's passes (caches, dev tools, project
+    /// discovery, git checks), so the Overview reads this instead and each row goes
+    /// from waiting to scanning to done exactly once.
+    @Published private(set) var cacheScanStage: CacheScanStage = .idle
+    @Published private(set) var scanPhase: ScanPhase = .idle
+    @Published private(set) var pendingCacheSizePaths: Set<String> = []
+    @Published private(set) var pendingDevToolSizeIDs: Set<String> = []
+    @Published private(set) var pendingProjectArtifactPaths: Set<String> = []
+    @Published var isDeleting = false
+    @Published var errorMessage: String?
+    @Published var showDeletionSheet = false
+    /// When set (e.g. tab-scoped cleanup), the confirmation sheet lists these instead of `deletionCandidates`.
+    @Published var deletionSheetCandidates: [DeletionCandidate]?
+    @Published var lastDeletionReport: DeletionReport?
+    /// Live session behind the cleanup overlay for manual "Clean Selected" runs.
+    /// Presented in `.cleaning` when deletion starts; flips to `.complete` in place.
+    @Published private(set) var manualDeletionSession: DeletionSession?
+    /// Already-complete session for the sidebar safe cleanup celebration.
+    @Published private(set) var interactiveSafeCleanupSession: DeletionSession?
+    /// When set, `ContentView` shows the onboarding celebration overlay instead of the standard deletion summary.
+    @Published var onboardingCelebrationMovedToTrashBytes: Int64?
+    @Published private(set) var interactiveSafeCleanupTargetPaths: Set<String> = []
+    @Published private(set) var interactiveSafeCleanupRemovedPaths: Set<String> = []
+    @Published private(set) var interactiveSafeCleanupMovedToTrashBytes: Int64?
+    @Published var hasFullDiskAccess = PermissionChecker().hasFullDiskAccess() {
+        didSet {
+            readableWithoutFullDiskAccess.removeAll()
+            if oldValue, !hasFullDiskAccess { dropRowsLockedByRevokedAccess() }
+        }
+    }
+    /// `ProtectedLocations.isReadable` answers by stored path. The Clean-button
+    /// filter asks while views render, and each answer costs a `readlink` per
+    /// path component, so it is asked once. Emptied when access changes and when
+    /// a scan starts, since a link can be repointed between scans.
+    private var readableWithoutFullDiskAccess: [String: Bool] = [:]
+    /// Shows `LookDeeperSheet`, the main window's one place to ask for Full Disk
+    /// Access. Set by the sidebar notice, the locked tabs, and a deleted-app review
+    /// that needs access to find leftovers.
+    @Published var isLookDeeperPresented = false
+    /// The Uninstall Purge sheet (#330), shown once its parts have been read so
+    /// it opens at its final size.
+    @Published var selfUninstall: SelfUninstaller?
+    /// True while the parts are read, before the sheet opens.
+    @Published private(set) var isPreparingSelfUninstall = false
+    var isSelfUninstallPresented: Bool { selfUninstall != nil }
+    /// True while Uninstall Purge turns parts off and moves files. Scans, cleans,
+    /// scheduled cleans and removed-app reviews wait.
+    @Published var isUninstallingPurge = false
+    /// Lifetime bytes Purge has moved to the trash. Not a reclaim figure: most of it
+    /// only becomes free space once the user empties the trash.
+    @Published var totalMovedToTrashBytes: Int64 = 0
+    @Published private(set) var lastScanCompletedAt: Date?
+    @Published private(set) var lastScanSafeRecoverableBytes: Int64?
+
+    @Published var showMissingLockfileFriction = false
+    @Published var showUncommittedGitFriction = false
+    /// Second-step confirmation after the primary deletion sheet when the batch includes Not Sure items.
+    @Published var showHighRiskDeletionSecondConfirm = false
+
+    /// Standardized paths with manual user categorizations. Mirrors `user_overrides.json`.
+    @Published private(set) var userOverridePaths: Set<String> = UserOverridesStore.allOverriddenPaths()
+    /// Paths the user excluded from scans. Purely subtractive: the scanner drops these
+    /// after the allowlist gate, so nothing new ever becomes scannable or cleanable.
+    @Published private(set) var excludedPaths: Set<String> = ExcludedPathsStore.allExcludedPaths()
+    /// Simulator runtimes the user excluded, kept by identifier because a runtime's
+    /// path changes when macOS mounts it (#178).
+    @Published private(set) var excludedSimulatorRuntimes: [ExcludedSimulatorRuntimeEntry] =
+        ExcludedSimulatorRuntimesStore.allEntries()
+    /// Bumped whenever `excludedPaths` changes, so a Large Files scan already under way
+    /// can tell that the list it started with is out of date.
+    private var exclusionRevision = 0
+
+    // MARK: Scan queue and records (Overview)
+
+    /// What the one-at-a-time scan queue is running and what is waiting.
+    /// Written only by the queue in `PurgeStore+ScanQueue.swift`.
+    @Published var scanQueue = ScanQueueState()
+    /// Steps the queue must rescan even if this session already has results.
+    var scanQueueForcedSteps = Set<ScanStep>()
+    var scanQueueTask: Task<Void, Never>?
+    /// The step the queue is running, held apart from the runner so Stop can cancel it.
+    var scanQueueStepTask: Task<Void, Never>?
+    /// Tells a finished runner apart from the one that replaced it after a Stop.
+    var scanQueueRunID = 0
+    /// How long the App Caches and Dev Tools step may hold up the rest. Without Full
+    /// Disk Access its `du` can sit in `open()` until someone answers a privacy
+    /// prompt, and Stop leaves that step running, so the queue stops waiting after
+    /// this and moves on. The other steps have no limit: Large Files and the app
+    /// scans often run longer than this on a big home folder, and Stop cancels them.
+    var cacheStepPatience: TimeInterval = 180
+    /// True while a scheduled clean runs its own scans. The queue starts nothing
+    /// until it is released, so those scans never run beside a queued one.
+    var isScanQueueHeld = false
+    /// The access behind the App Caches and Dev Tools results on screen, or behind
+    /// the scan filling them. Nil until one has run in this session.
+    private(set) var generalResultsAccess: ScanAccess?
+    private(set) var developerResultsAccess: ScanAccess?
+    /// Last finished scan per Overview category, read at launch and kept current.
+    @Published private(set) var scanRecords: [OverviewCategory: ScanRecord] = [:]
+    /// Rows from the last scan's saved file (#283), for display only. See
+    /// `PurgeStore+LastScan.swift`: nothing that cleans or counts reads them.
+    @Published var lastScanRows = LastScanRows() {
+        didSet { if lastScanRows.installedApps != oldValue.installedApps { appSuiteInputsDidChange() } }
+    }
+    /// Nil under the test host unless a test passes its own.
+    let lastScanStore: LastScanStore?
+    /// Lists whose scan ran to its end this session, so they may replace the file.
+    var lastScanSavable: Set<LastScanSection> = []
+    /// Lists that changed since the file was last written.
+    var lastScanDirty: Set<LastScanSection> = []
+    /// When each list's scan last finished, which the file dates its rows by.
+    var lastScanFinishedAt: [LastScanSection: Date] = [:]
+    var lastScanWriteTask: Task<Void, Never>?
+    /// Writes handed to the file store, for tests to wait on.
+    var lastScanWriteCount = 0
+    /// Paths a clean, an uninstall or a deletion outside Purge took out this
+    /// session. The launch read leaves them out, in case it finishes after them.
+    var lastScanForgottenPaths: Set<String> = []
+    /// True once App Caches and Dev Tools have finished a scan in this session.
+    @Published private(set) var hasSessionCacheScan = false
+    /// True once the App Caches half has finished in this session, even if it found
+    /// nothing. The pair above only turns true after Dev Tools finishes too.
+    @Published private(set) var hasSessionGeneralScan = false
+    private let scanRecordStore: ScanRecordStore
+    private var scanRecordRefreshTask: Task<Void, Never>?
+    /// Bumped whenever anything a category total reads changes; keys the Overview cache.
+    private(set) var categoryInputsRevision = 0
+
+    // MARK: Everything else (#220)
+
+    /// What the Everything else walk has found this session, filling in as it
+    /// runs. Read only: nothing in it is selectable or reaches a delete path.
+    /// Written only by `measureEverythingElse` in `PurgeStore+EverythingElse.swift`.
+    @Published var everythingElseMeasurement: EverythingElseMeasurement?
+    /// Bumped on every change to the measurement; keys the breakdown cache.
+    var everythingElseMeasurementRevision = 0
+    @Published var isMeasuringEverythingElse = false
+    /// Which page the Overview tab shows: the summary, or Everything else opened.
+    @Published var overviewPage: OverviewPage = .summary
+    var everythingElseMeasureGeneration = 0
+    var everythingElseBreakdownCache: (key: EverythingElseBreakdownKey, breakdown: EverythingElseBreakdown)?
+    /// The last Overview breakdown and what it was computed from. Scan flushes re-render
+    /// every observer several times a second, and the breakdown walks every path found.
+    var overviewBreakdownCache: (key: OverviewBreakdownKey, breakdown: OverviewBreakdown)?
+    private var removableTotalsTask: Task<Void, Never>?
+
+    private let cacheScanner: CacheScanner
+    private let devScanner: DevScanner
+    /// Access and scan results for App Caches, Dev Tools and Large Files. `live` outside tests.
+    let scanSources: ScanSources
+
+    /// Runs a package manager's own uninstall for one tool (#225) or cask app
+    /// (#254). Tests swap in a fake so no manager runs.
+    var packageManagerUninstall: (PackageManagerTool) async -> PackageManagerUninstaller.Outcome = {
+        await PackageManagerUninstaller.uninstall($0)
+    }
+    /// Where the cask gate re-reads Homebrew's Caskrooms before a removal
+    /// (#254). Tests point it at a temporary prefix.
+    var homebrewPrefixes: [URL] = HomebrewCaskCatalog.defaultPrefixes
+    /// `brew cleanup <token>` after Homebrew removed a cask app (#254), which
+    /// drops the cask's cached download. Tests swap in a fake.
+    var homebrewCleanup: (HomebrewCask) async -> Void = { cask in
+        await HomebrewCaskCatalog.cleanup(cask)
+    }
+    /// Whether the secure removal helper is on. Tests swap in a fixed answer, so
+    /// none ever registers the real helper (#299).
+    var helperIsEnabled: () -> Bool = { PrivilegedHelperPreferenceStore.shared.isEnabled }
+    /// Turns the helper on: the one-time setup a held app's first tap starts.
+    var enableHelper: () -> Void = { PrivilegedHelperPreferenceStore.shared.setEnabled(true) }
+    private let uninstallScanner = AppUninstallScanner()
+    private let orphanScanner = OrphanLeftoverScanner()
+    private let duplicateDetector = DuplicateFileDetector()
+    private let fileDeleter: FileDeleter
+    let defaults: UserDefaults
+    private let gitChecker: GitStatusChecker
+
+    private enum ScanCoalesce {
+        /// One publish every ~8 frames. Fast enough that the count reads as live,
+        /// slow enough that each tick's `.numericText()` roll finishes before the
+        /// next value lands rather than being retargeted mid-flight.
+        static let flushInterval: Duration = .milliseconds(140)
+        static let flushThreshold = 100
+    }
+
+    /// The scan-flush cadence in seconds, derived from `ScanCoalesce.flushInterval`.
+    ///
+    /// The sidebar hero rolls its digits with a linear animation matched to this beat so
+    /// each tick hands off to the next instead of being retargeted mid-curve. Derived
+    /// rather than restated so retuning the interval cannot silently desynchronise the
+    /// animation from the publish rate.
+    static let scanFlushIntervalSeconds: Double = {
+        let components = ScanCoalesce.flushInterval.components
+        return Double(components.seconds) + Double(components.attoseconds) * 1e-18
+    }()
+
+    /// Cancels stale async simulator sizing when a new dev scan starts.
+    private var simulatorSizingGeneration = 0
+    private var scanGeneration = 0
+    private var largeFileScanGeneration = 0
+    private var hasCompletedLargeFileScan = false
+    /// The filters the finished Large Files scan ran under. Its rows count as this
+    /// session's results only while the filters still match, so a filter changed
+    /// without a rescan never shows the old rows against the new filter (#279).
+    private var completedLargeFileFilter: LargeFileFilterSnapshot?
+    /// The rows the saved Large Files record counted, by id, from the last scan this
+    /// session that ran to the end. Empty while the record is from an earlier launch.
+    private var recordedLargeFileSizes: [String: (bytes: Int64, category: LargeFileCategory)] = [:]
+    private var installedAppsScanGeneration = 0
+    private var orphanScanGeneration = 0
+    private var commandLineToolScanGeneration = 0
+    /// The in-flight duplicate pass, so a new scan can abandon gigabytes of
+    /// hashing nobody is waiting for any more.
+    private var duplicateScanTask: Task<Void, Never>?
+    /// All cache items discovered so far in the current scan, including rows whose
+    /// sizes are still unresolved. Only rows with a resolved non-zero size are
+    /// published to `cacheItems`, so visible sections grow monotonically during a scan.
+    private var stagedGeneralCacheItems: [CacheItem] = []
+    /// Dev tools discovered but not yet sized; published to `devTools` once their size resolves.
+    private var stagedDevToolsByID: [String: DevTool] = [:]
+    /// Simulators discovered but not yet sized; published once their size resolves.
+    private var stagedSimulatorsByID: [UUID: SimulatorDevice] = [:]
+    private var scanTask: Task<Void, Never>?
+    private var projectDiscoveryTask: Task<Void, Never>?
+    /// Project discovery finished while the full scan it started with was still
+    /// running. The project list is saved once that scan finishes.
+    private var projectListFinishedDuringFullScan = false
+    private var scanCompletionHideTask: Task<Void, Never>?
+    private var interactiveSafeCleanupRemovalTask: Task<Void, Never>?
+    /// Set while an interactive safe cleanup tracks a live engine run, so
+    /// `performSafeCleanup` can stream per-item progress into the overlay.
+    private var interactiveSafeCleanupProgressBuffer: DeletionProgressBuffer?
+    private var interactiveSafeCleanupProgressPoller: Task<Void, Never>?
+    private var interactiveCleanupStartedAt: Date?
+
+    /// After the primary confirm sheet runs, extra warnings may enqueue here.
+    private var stagedDeletionCandidates: [DeletionCandidate]?
+    private var stagedDeletionTrigger: CleanupTrigger = .manual
+    /// Holds candidates between the primary sheet and the second high-risk alert.
+    private var highRiskDeletionStagingCandidates: [DeletionCandidate]?
+
+    /// A single clean reporting more than this is a bad size measurement, not a real recovery.
+    private static let maxReasonableSingleCleanBytes: Int64 = 2_000_000_000_000
+    /// Anything past this in defaults is corruption; the lifetime total itself is unbounded.
+    private static let maxStorableLifetimeMovedBytes: Int64 = 1_000_000_000_000_000
+
+    var hasDisplayableLifetimeStats: Bool {
+        totalMovedToTrashBytes > 0
+    }
+
+    /// `defaults`, `scanSources`, `gitChecker`, `fileDeleter` and `lastScanStore` are
+    /// for tests; the app uses the standard ones. A test's deleter keeps a fake Trash, so nothing
+    /// a test makes reaches the user's own (#171).
+    init(
+        defaults: UserDefaults = .standard,
+        scanSources: ScanSources? = nil,
+        gitChecker: GitStatusChecker = GitStatusChecker(),
+        fileDeleter: FileDeleter = FileDeleter(),
+        lastScanStore: LastScanStore? = TestHost.isActive() ? nil : LastScanStore()
+    ) {
+        let cacheScanner = CacheScanner()
+        let devScanner = DevScanner()
+        self.cacheScanner = cacheScanner
+        self.devScanner = devScanner
+        self.gitChecker = gitChecker
+        self.fileDeleter = fileDeleter
+        self.scanSources = scanSources
+            ?? .live(
+                cacheScanner: cacheScanner,
+                devScanner: devScanner,
+                gitChecker: gitChecker,
+                largeFileScanner: LargeFileScanner(),
+                aiModelScanner: AIModelScanner(),
+                everythingElseMeasurer: EverythingElseMeasurer()
+            )
+        self.defaults = defaults
+        self.scanRecordStore = ScanRecordStore(defaults: defaults)
+        self.lastScanStore = lastScanStore
+        var moved = Int64(defaults.integer(forKey: StorageKeys.totalMovedToTrashBytes))
+        if moved > Self.maxStorableLifetimeMovedBytes {
+            moved = 0
+            defaults.set(0, forKey: StorageKeys.totalMovedToTrashBytes)
+        }
+        totalMovedToTrashBytes = moved
+        lastScanCompletedAt = defaults.object(forKey: StorageKeys.lastScanCompletedAt) as? Date
+        if defaults.object(forKey: StorageKeys.lastScanSafeRecoverableBytes) != nil {
+            lastScanSafeRecoverableBytes = Int64(defaults.integer(forKey: StorageKeys.lastScanSafeRecoverableBytes))
+        }
+        scanRecords = scanRecordStore.allRecords()
+    }
+
+    var selectedTotalBytes: Int64 {
+        let selectedCaches = cacheItems.filter { scanSelection.cacheIDs.contains($0.id) }.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        let selectedTools = devTools.filter { scanSelection.devToolIDs.contains($0.id) }.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        let simSelected = simulatorDevices.filter { scanSelection.simulatorIDs.contains($0.id) }.reduce(Int64(0)) { $0 + ($1.sizeOnDisk ?? 0) }
+        let runtimeSelected = simulatorRuntimes.filter { scanSelection.simulatorRuntimeIDs.contains($0.id) }.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        let projectSelected = projectGroups.flatMap(\.artifacts).filter { scanSelection.artifactIDs.contains($0.id) }.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        return selectedCaches + selectedTools + simSelected + runtimeSelected + projectSelected
+    }
+
+    /// Byte totals for one-click safe cleanup, grouped by tab so sidebar and filter totals stay aligned.
+    /// Simulator devices and runtimes are left out on purpose: removing one is not a
+    /// Trash move, and one-click cleans only move things to the Trash. They are never
+    /// Safe either, so Dev Tools and the Overview agree (#136).
+    struct SafeCleanupSummary {
+        var appCacheBytes: Int64 = 0
+        var devToolBytes: Int64 = 0
+        var projectArtifactBytes: Int64 = 0
+
+        var totalBytes: Int64 {
+            appCacheBytes + devToolBytes + projectArtifactBytes
+        }
+    }
+
+    /// Memoised `safeCleanupSummary`, cleared by `didSet` on each of the four inputs it
+    /// reads. Invalidating from `didSet` rather than at the call sites means subscript
+    /// writes (`cacheItems[i].safetyInfo = …`) invalidate too, so no mutation path can
+    /// silently leave a stale total behind.
+    private var cachedSafeCleanupSummary: SafeCleanupSummary?
+
+    fileprivate func invalidateSafeCleanupSummary() {
+        cachedSafeCleanupSummary = nil
+    }
+
+    /// The sidebar hero, the Clean button title, and the footnote all read this, several
+    /// times each per render, and the render re-runs on every scan flush. Recomputing was
+    /// a full sweep of every cache item, dev tool, and project artifact each time —
+    /// including a `standardizedFileURL` per dev-tool path, which is the expensive part.
+    var safeCleanupSummary: SafeCleanupSummary {
+        if let cached = cachedSafeCleanupSummary {
+            return cached
+        }
+        let summary = computeSafeCleanupSummary()
+        cachedSafeCleanupSummary = summary
+        return summary
+    }
+
+    /// Adds up what `manualSafeCleanupCandidates` would move, path by path and in
+    /// the same order, so a folder two rows list is counted once, for the first
+    /// row, as the clean takes it once (#183). Only paths the rows already hold
+    /// are read: this runs on every scan flush, so it does not ask the disk or
+    /// the safety policy again. The scan has applied both to every row.
+    private func computeSafeCleanupSummary() -> SafeCleanupSummary {
+        var summary = SafeCleanupSummary()
+        var seenPaths = Set<String>()
+
+        for artifact in projectGroups.flatMap(\.artifacts) where countsAsSafeCleanup(artifact) {
+            guard seenPaths.insert(artifact.path.path).inserted else { continue }
+            summary.projectArtifactBytes += artifact.sizeBytes
+        }
+
+        for tool in devTools where countsAsSafeCleanup(tool) {
+            for path in tool.standardizedPaths where seenPaths.insert(path).inserted {
+                summary.devToolBytes += tool.pathSizeBytesByPath[path] ?? (tool.paths.count == 1 ? tool.sizeBytes : 0)
+            }
+        }
+
+        for item in cacheItems where countsAsSafeCleanup(item) {
+            for (path, location) in zip(item.standardizedPaths, item.locations) {
+                guard !MacOSInstallLeftovers.isEntryPath(path), seenPaths.insert(path).inserted else { continue }
+                summary.appCacheBytes += location.sizeBytes
+            }
+        }
+        return summary
+    }
+
+    // The one rule for what Clean Safe Items and scheduled cleans take
+    // (`manualSafeCleanupCandidates`). The Overview's safe totals and its
+    // pre-selection read the same rule, so they count what a clean moves (#185).
+
+    private func countsAsSafeCleanup(_ item: CacheItem) -> Bool {
+        item.safetyInfo.level == .safe
+            && item.reinstallSafety != .missingLockfile
+            && item.gitStatus == .clean
+            // Never counted or pre-selected as safe, even when overridden to Safe:
+            // the helper moves these as root, so only when the user picks them (#127).
+            && !item.standardizedPaths.contains { MacOSInstallLeftovers.isEntryPath($0) }
+    }
+
+    /// Every path must have answered clean. Dirty, unknown and not yet checked all
+    /// keep the tool out, as the clean-time git check would.
+    private func countsAsSafeCleanup(_ tool: DevTool) -> Bool {
+        tool.isDetected
+            && tool.safetyInfo.level == .safe
+            && tool.reinstallSafety != .missingLockfile
+            && tool.standardizedPaths.allSatisfy { devToolRepoStatusByPath[$0] == .clean }
+    }
+
+    private func countsAsSafeCleanup(_ artifact: ProjectCacheArtifact) -> Bool {
+        artifact.safetyInfo.level == .safe
+            && artifact.reinstallSafety != .missingLockfile
+            && artifact.gitStatus == .clean
+    }
+
+    /// Opening App Caches or Dev Tools from its Overview row, whose one line is the
+    /// safe-to-clean figure. The tab shows Safe for this visit, and once the scan has
+    /// settled, exactly what that figure counts is selected, replacing any earlier
+    /// selection, so Clean Selected moves the amount the row showed. With nothing
+    /// safe, the tab opens as it would from the sidebar.
+    func openFromOverview(_ category: OverviewCategory) {
+        let tab: Tab
+        switch category {
+        case .appCaches: tab = .appCaches
+        case .devTools: tab = .devTools
+        case .largeFiles, .apps, .leftovers: return
+        }
+        if (safeCleanupBytes(for: category) ?? 0) > 0 {
+            safetyFilterVisitTab = tab
+            if isSettled(category) {
+                scanSelection.removeAll()
+                switch category {
+                case .appCaches:
+                    scanSelection.cacheIDs = Set(cacheItems.filter(countsAsSafeCleanup).map(\.id))
+                default:
+                    scanSelection.devToolIDs = Set(devTools.filter(countsAsSafeCleanup).map(\.id))
+                    scanSelection.artifactIDs = Set(projectGroups.flatMap(\.artifacts).filter(countsAsSafeCleanup).map(\.id))
+                }
+            }
+        }
+        selectedTab = tab
+    }
+
+    /// The filter a tab shows: Safe during an Overview visit, the saved one otherwise.
+    func safetyFilter(for tab: Tab, saved: SafetyFilter) -> SafetyFilter {
+        safetyFilterVisitTab == tab ? .safe : saved
+    }
+
+    /// The user picked a filter. It is saved by the tab and replaces the visit's Safe.
+    func endSafetyFilterVisit() {
+        safetyFilterVisitTab = nil
+    }
+
+    var safeRecoverableBytes: Int64 {
+        safeCleanupSummary.totalBytes
+    }
+
+    var isInteractiveSafeCleanupInProgress: Bool {
+        !interactiveSafeCleanupTargetPaths.isEmpty && interactiveSafeCleanupMovedToTrashBytes == nil
+    }
+
+    // MARK: - Interactive safe-cleanup row hiding
+
+    /// Whether a row should be hidden because an interactive safe cleanup already
+    /// removed everything it targeted.
+    ///
+    /// The leading `isEmpty` check is the important part. These helpers are called once
+    /// per item inside the views' `visibleIndices`, which SwiftUI re-evaluates many times
+    /// per render — and the old per-view copies standardized every row path first, which
+    /// stats the filesystem. Profiling attributed a large share of the tab-switch stall
+    /// to exactly that. No cleanup is running for the overwhelming majority of renders,
+    /// and when the target set is empty the answer is `false` for every row, so the
+    /// guard skips the whole scan.
+    func isVisuallyRemovedBySafeCleanup(paths: [String]) -> Bool {
+        guard !interactiveSafeCleanupTargetPaths.isEmpty else { return false }
+        var sawTarget = false
+        for path in paths where interactiveSafeCleanupTargetPaths.contains(path) {
+            sawTarget = true
+            if !interactiveSafeCleanupRemovedPaths.contains(path) { return false }
+        }
+        return sawTarget
+    }
+
+    func isVisuallyRemovedBySafeCleanup(_ item: CacheItem) -> Bool {
+        isVisuallyRemovedBySafeCleanup(paths: item.standardizedPaths)
+    }
+
+    func isVisuallyRemovedBySafeCleanup(_ tool: DevTool) -> Bool {
+        isVisuallyRemovedBySafeCleanup(paths: tool.standardizedPaths)
+    }
+
+    func isVisuallyRemovedBySafeCleanup(_ artifact: ProjectCacheArtifact) -> Bool {
+        guard !interactiveSafeCleanupTargetPaths.isEmpty else { return false }
+        let path = artifact.path.standardizedFileURL.path
+        return interactiveSafeCleanupTargetPaths.contains(path)
+            && interactiveSafeCleanupRemovedPaths.contains(path)
+    }
+
+    // Whether a row shows in its tab under `filter`. The tab lists and the page
+    // subtitle read these same rules, so the header counts the rows on screen (#185).
+
+    func showsRow(_ item: CacheItem, under filter: SafetyFilter) -> Bool {
+        filter.matches(item.safetyInfo) && !isVisuallyRemovedBySafeCleanup(item)
+    }
+
+    func showsRow(_ tool: DevTool, under filter: SafetyFilter) -> Bool {
+        tool.isDetected && filter.matches(tool.safetyInfo) && !isVisuallyRemovedBySafeCleanup(tool)
+    }
+
+    func showsRow(_ artifact: ProjectCacheArtifact, under filter: SafetyFilter) -> Bool {
+        filter.matches(artifact.safetyInfo) && !isVisuallyRemovedBySafeCleanup(artifact)
+    }
+
+    /// `true` while the cleanup overlay is in its cleaning phase — used to gate
+    /// navigation. Window close and app quit read `isAnyCleanInProgress`.
+    var isManualCleaningInProgress: Bool {
+        manualDeletionSession?.phase == .cleaning
+            || interactiveSafeCleanupSession?.phase == .cleaning
+    }
+
+    /// `true` while any clean is moving items: the cleanup overlay's cleaning
+    /// phase, or an engine run with no overlay, such as a scheduled clean, the
+    /// menu bar's Clean, an uninstall or a leftover review. Quitting then can
+    /// leave items half removed and the run out of Cleanup History, so window
+    /// close and app quit ask first. The guard read only the overlay, so an
+    /// unattended clean could be cut off without a word (#173).
+    var isAnyCleanInProgress: Bool {
+        isDeleting || isManualCleaningInProgress
+    }
+
+    /// `true` while a review sheet, confirmation, clean, or its summary owns the
+    /// window. `ContentView` can present only one of these at a time, so an
+    /// unprompted review waits until this clears.
+    var isShowingReviewOrCleaning: Bool {
+        isReviewingOrCleaning
+            || isSelfUninstallPresented
+            || isPreparingSelfUninstall
+            || manualDeletionSession != nil
+            || interactiveSafeCleanupSession != nil
+            || onboardingCelebrationMovedToTrashBytes != nil
+            || errorMessage != nil
+    }
+
+    /// `true` while a review or a delete confirmation is open, or a clean is
+    /// running. A due scheduled clean waits until this clears (#173). Summaries
+    /// and error alerts are left out: they can stay set with no window open, and
+    /// the schedule would then never run.
+    var isReviewingOrCleaning: Bool {
+        uninstallPlan != nil
+            || orphanCleanupPlan != nil
+            || removedAppLeftoverPlan != nil
+            || commandLineToolRemovalPlan != nil
+            || isBuildingUninstallPlan
+            || showDeletionSheet
+            || showLargeFileDeletionSheet
+            || pendingDuplicateCleanup != nil
+            || pendingRemoveDownload != nil
+            || showMissingLockfileFriction
+            || showUncommittedGitFriction
+            || showHighRiskDeletionSecondConfirm
+            || isDeleting
+            || isManualCleaningInProgress
+            || isInteractiveSafeCleanupInProgress
+            || isUninstallingPurge
+    }
+
+    /// Whether a sheet other than Uninstall Purge is open. SwiftUI shows one
+    /// sheet at a time, so Uninstall Purge can't open over one.
+    var isAnotherSheetOpen: Bool {
+        isLookDeeperPresented
+            || showDeletionSheet
+            || showLargeFileDeletionSheet
+            || pendingRemoveDownload != nil
+            || removeDownloadResult != nil
+            || pendingDuplicateCleanup != nil
+            || uninstallPlan != nil
+            || orphanCleanupPlan != nil
+            || commandLineToolRemovalPlan != nil
+            || removedAppLeftoverPlan != nil
+    }
+
+    /// Opens the Uninstall Purge sheet, unless another sheet is up.
+    func presentSelfUninstall() {
+        Task { await openSelfUninstall() }
+    }
+
+    /// Reads which parts are on, then opens the sheet. Reading first keeps the
+    /// sheet from opening small and growing once the list arrives.
+    func openSelfUninstall(model: SelfUninstaller? = nil) async {
+        guard !isAnotherSheetOpen, !isSelfUninstallPresented, !isPreparingSelfUninstall else { return }
+        isPreparingSelfUninstall = true
+        let model = model ?? SelfUninstaller.live(store: self)
+        await model.load()
+        isPreparingSelfUninstall = false
+        // Another sheet may have opened while the parts were read.
+        guard !isAnotherSheetOpen, !isSelfUninstallPresented else { return }
+        selfUninstall = model
+    }
+
+    /// Whether a safe clean may claim `isDeleting` now. A scheduled clean also
+    /// waits for an open review or delete confirmation. The sweep checks before
+    /// the clean's rescan, and a review can open during it, so the clean checks
+    /// again right before it claims `isDeleting` (#173).
+    func mayStartSafeClean(trigger: CleanupTrigger) -> Bool {
+        switch trigger {
+        case .manual:
+            return !isDeleting && !isUninstallingPurge
+        case .scheduled:
+            return !isReviewingOrCleaning
+        }
+    }
+
+    /// Whether a confirmed clean may start now. A running clean holds `isDeleting`,
+    /// and a second one beside it would race it for the same rows and the progress
+    /// overlay. The confirmation has closed by the time this runs, and the alert
+    /// says why nothing happened (#173). What is kept: the rows stay selected, so
+    /// one click reopens the same confirmation once the clean ends. What is lost:
+    /// the keepers picked in a duplicates review go back to the suggested ones.
+    /// The removed-app review is the exception, since it cannot be reopened by
+    /// hand: `confirmRemovedAppLeftovers` holds it for `RemovedAppMonitor` to
+    /// show again. Callers claim `isDeleting` with no await after this check.
+    private func claimConfirmedCleanOrExplain() -> Bool {
+        guard !isDeleting else {
+            errorMessage = String(localized: "Purge is already cleaning. Wait for it to finish, then try again.")
+            return false
+        }
+        return true
+    }
+
+    /// Set when a removed-app review was confirmed while another clean ran. The
+    /// review closes with an alert, and `RemovedAppMonitor` reads this flag as the
+    /// sheet closes to put the review back at the front of its queue, so it opens
+    /// again once the clean ends. A review dismissed that way can't be reopened
+    /// by hand, so the monitor keeps its handoff record until the second showing
+    /// is over (#173).
+    private(set) var removedAppReviewHeldForAnotherClean = false
+
+    /// Reads and clears `removedAppReviewHeldForAnotherClean`.
+    func takeRemovedAppReviewHeldForAnotherClean() -> Bool {
+        defer { removedAppReviewHeldForAnotherClean = false }
+        return removedAppReviewHeldForAnotherClean
+    }
+
+    /// Set when the last leftover clean failed as a whole, before anything was
+    /// reported, and its alert asked to try again. A removed-app review is the
+    /// one leftover clean that can't be tried again by hand, so
+    /// `RemovedAppMonitor` reads this as the session clears and shows the
+    /// review again once the alert is dismissed (#177).
+    private(set) var leftoverCleanupFailed = false
+
+    /// Reads and clears `leftoverCleanupFailed`.
+    func takeLeftoverCleanupFailure() -> Bool {
+        defer { leftoverCleanupFailed = false }
+        return leftoverCleanupFailed
+    }
+
+    /// Paths that match the safety, git, and lockfile rules used by safe cleanup
+    /// (manual and scheduled — both clean the same set).
+    ///
+    /// - Parameter includingProjects: False leaves every project folder out. A
+    ///   scheduled clean passes it when project discovery had not settled in time.
+    func manualSafeCleanupCandidates(includingProjects: Bool = true) -> [DeletionCandidate] {
+        var candidates: [DeletionCandidate] = []
+
+        // Revoking access already drops locked rows (`dropRowsLockedByRevokedAccess`).
+        // This keeps the Clean buttons, their animation and the Trash in step if a
+        // row slips through, by the rule the cleanup itself applies. Checked before
+        // a candidate is built, since building one standardizes its path, and that
+        // stat through a link into Documents is the prompt.
+        let isLimited = !hasFullDiskAccess
+        func isReachable(_ url: URL) -> Bool {
+            !isLimited || isReadableWithoutFullDiskAccess(url)
+        }
+
+        let artifacts = includingProjects ? projectGroups.flatMap(\.artifacts) : []
+        for artifact in artifacts where countsAsSafeCleanup(artifact) {
+            guard isReachable(artifact.path) else { continue }
+            candidates.append(artifactDeletionCandidate(artifact))
+        }
+
+        for tool in devTools where countsAsSafeCleanup(tool) {
+            for url in tool.paths where isReachable(url) {
+                candidates.append(devToolDeletionCandidate(tool, path: url))
+            }
+        }
+
+        for item in cacheItems where countsAsSafeCleanup(item) {
+            for location in item.locations where isReachable(location.path) {
+                let path = location.path.standardizedFileURL
+                guard DeletionSafetyPolicy.isOfferedForCleanup(path) else { continue }
+                // Moved as root by the helper, so only ever when the user picks the
+                // row, even if they overrode it to Safe (#127).
+                guard !MacOSInstallLeftovers.isEntryPath(path.path) else { continue }
+                candidates.append(
+                    DeletionCandidate(
+                        title: CacheHeadline.localized(item.appName, cacheFolder: item.path.lastPathComponent, appFolder: item.bundleID),
+                        path: path,
+                        sizeBytes: location.sizeBytes,
+                        safetyInfo: item.safetyInfo,
+                        reinstallCommand: item.safetyInfo.reinstallCommand,
+                        subtitle: DeletionCandidate.cacheLocationLabel(location),
+                        reinstallSafety: Self.cacheReinstallStatus(forPath: path),
+                        gitStatus: item.gitStatus
+                    )
+                )
+            }
+        }
+
+        var seenPaths = Set<String>()
+        return candidates
+            .filter { candidate in
+                let path = candidate.path.standardizedFileURL.path
+                guard !seenPaths.contains(path) else { return false }
+                seenPaths.insert(path)
+                return true
+            }
+            .sorted { $0.sizeBytes > $1.sizeBytes }
+    }
+
+    var selectedCount: Int {
+        let selectedCaches = cacheItems.filter { scanSelection.cacheIDs.contains($0.id) }.count
+        let selectedTools = devTools.filter { scanSelection.devToolIDs.contains($0.id) }.count
+        let selectedSims = simulatorDevices.filter { scanSelection.simulatorIDs.contains($0.id) }.count
+        let selectedRuntimes = simulatorRuntimes.filter { scanSelection.simulatorRuntimeIDs.contains($0.id) }.count
+        let selectedProjects = projectGroups.flatMap(\.artifacts).filter { scanSelection.artifactIDs.contains($0.id) }.count
+        return selectedCaches + selectedTools + selectedSims + selectedRuntimes + selectedProjects
+    }
+
+    /// Selected caches for manual delete (includes Not Sure when selected).
+    var selectedGeneralDeletionCandidates: [DeletionCandidate] {
+        cacheItems.filter { scanSelection.cacheIDs.contains($0.id) }
+            .flatMap { DeletionCandidate.deletionCandidates(forCache: $0) }
+            .sorted { $0.sizeBytes > $1.sizeBytes }
+    }
+
+    /// Selected Dev Tools paths (standard caches + grouped project artifacts).
+    var selectedDeveloperDeletionCandidates: [DeletionCandidate] {
+        let tools = devTools.filter { scanSelection.devToolIDs.contains($0.id) }.filter(\.isDetected)
+            .flatMap { tool in
+                tool.paths.map { path in
+                    devToolDeletionCandidate(tool, path: path)
+                }
+            }
+
+        let sims = simulatorDevices.filter { scanSelection.simulatorIDs.contains($0.id) }
+            .map(simulatorDeletionCandidate)
+
+        let runtimes = selectedSimulatorRuntimeCandidates()
+
+        let artifacts = projectGroups.flatMap(\.artifacts)
+            .filter { scanSelection.artifactIDs.contains($0.id) }
+            .map(artifactDeletionCandidate)
+
+        let merged = tools + sims + runtimes + artifacts
+        let unique = Dictionary(grouping: merged, by: { $0.path }).compactMap { $0.value.first }
+        return unique.sorted { $0.sizeBytes > $1.sizeBytes }
+    }
+
+    var deletionCandidates: [DeletionCandidate] {
+        let caches = cacheItems.filter { scanSelection.cacheIDs.contains($0.id) }
+            .flatMap { DeletionCandidate.deletionCandidates(forCache: $0) }
+
+        let tools = devTools.filter { scanSelection.devToolIDs.contains($0.id) }.filter(\.isDetected)
+            .flatMap { tool in tool.paths.map { devToolDeletionCandidate(tool, path: $0) } }
+
+        let sims = simulatorDevices.filter { scanSelection.simulatorIDs.contains($0.id) }
+            .map(simulatorDeletionCandidate)
+
+        let runtimes = selectedSimulatorRuntimeCandidates()
+
+        let artifacts = projectGroups.flatMap(\.artifacts)
+            .filter { scanSelection.artifactIDs.contains($0.id) }
+            .map(artifactDeletionCandidate)
+
+        let unique = Dictionary(grouping: caches + tools + sims + runtimes + artifacts, by: { $0.path }).compactMap { $0.value.first }
+        return unique.sorted { $0.sizeBytes > $1.sizeBytes }
+    }
+
+    var deletionCandidatesForSheet: [DeletionCandidate] {
+        deletionSheetCandidates ?? deletionCandidates
+    }
+
+    func presentDeletionSheet(candidates: [DeletionCandidate]) {
+        deletionSheetCandidates = candidates
+        showDeletionSheet = true
+    }
+
+    func dismissDeletionSheet() {
+        showDeletionSheet = false
+        deletionSheetCandidates = nil
+    }
+
+    func presentDeletionSheetResolvingGit(candidates: [DeletionCandidate]) async {
+        // The checker keeps the access of the last scan. Access may have been
+        // turned off since, and `git status` in a git dir under Documents prompts.
+        await gitChecker.setAccess(currentScanAccess())
+        presentDeletionSheet(candidates: await resolvingUnknownGitStatus(candidates))
+    }
+
+    /// The candidates Clean Safe Items and scheduled cleans may move: those whose git
+    /// check answered clean. Dirty, unknown and no answer at all are left alone.
+    ///
+    /// `keptTogether` lists the paths of each dev tool. A tool goes whole or not at
+    /// all, as `countsAsSafeCleanup` decides at scan time: one path that no longer
+    /// answers clean keeps every path of its tool (#185).
+    static func gitCleanCandidates(
+        _ candidates: [DeletionCandidate],
+        statuses: [String: GitWorktreeStatus],
+        keptTogether groups: [[String]] = []
+    ) -> [DeletionCandidate] {
+        let isClean: (DeletionCandidate) -> Bool = { statuses[$0.path.standardizedFileURL.path] == .clean }
+        let offered = Set(candidates.map { $0.path.standardizedFileURL.path })
+        let held = Set(groups.filter { group in
+            group.contains { offered.contains($0) && statuses[$0] != .clean }
+        }.joined())
+        return candidates.filter { isClean($0) && !held.contains($0.path.standardizedFileURL.path) }
+    }
+
+    /// Fills in the git status of every candidate that has none, with one check for
+    /// all of them. Asking one candidate at a time waited for each repository's
+    /// `git status` in turn; the checker runs up to four at once (#190).
+    private func resolvingUnknownGitStatus(_ candidates: [DeletionCandidate]) async -> [DeletionCandidate] {
+        var resolved = candidates
+        let unknown = resolved.indices.filter { resolved[$0].gitStatus == .unknown }
+        guard !unknown.isEmpty else { return resolved }
+        let statuses = await gitChecker.cleanupStatuses(for: unknown.map { resolved[$0].path })
+        for index in unknown {
+            resolved[index].gitStatus = statuses[resolved[index].path.standardizedFileURL.path] ?? .clean
+        }
+        return resolved
+    }
+
+    func userConfirmedDeletionFromPrimarySheet() {
+        let picks = deletionSheetCandidates ?? deletionCandidates
+        guard !picks.isEmpty else {
+            dismissDeletionSheet()
+            return
+        }
+        dismissDeletionSheet()
+        if picks.contains(where: { $0.safetyInfo.level == .unknown }) {
+            highRiskDeletionStagingCandidates = picks
+            showHighRiskDeletionSecondConfirm = true
+            return
+        }
+        beginManualDeletionPipeline(with: picks)
+    }
+
+    func confirmHighRiskDeletionSecondStep() {
+        showHighRiskDeletionSecondConfirm = false
+        guard let picks = highRiskDeletionStagingCandidates, !picks.isEmpty else {
+            highRiskDeletionStagingCandidates = nil
+            return
+        }
+        highRiskDeletionStagingCandidates = nil
+        beginManualDeletionPipeline(with: picks)
+    }
+
+    func cancelHighRiskDeletionSecondStep() {
+        showHighRiskDeletionSecondConfirm = false
+        highRiskDeletionStagingCandidates = nil
+    }
+
+    /// The Not Sure alert. Those folders go to the Trash. A simulator or runtime
+    /// selected in the same cleanup is deleted permanently, so the alert says so.
+    var highRiskDeletionSecondConfirmMessage: String {
+        let base = String(localized: "Purge doesn't know what these folders are for. They go to the Trash, so you can put them back, but check that nothing depends on them before you clean.")
+        guard confirmationRemovesSimulators(highRiskDeletionStagingCandidates ?? []) else { return base }
+        return base + " " + String(localized: "iOS simulators and simulator runtimes in this cleanup are deleted permanently through simctl and can't be put back.")
+    }
+
+    /// The unsaved-git alert. The projects go to the Trash. Same simulator note.
+    var uncommittedGitFrictionMessage: String {
+        let base = String(localized: "One of your projects has changes that have not been saved to git yet. Make sure your work is backed up before cleaning. Files and folders go to the Trash, so you can put them back.")
+        guard confirmationRemovesSimulators(stagedDeletionCandidates ?? []) else { return base }
+        return String(localized: "One of your projects has changes that have not been saved to git yet. Make sure your work is backed up before cleaning. Files and folders go to the Trash. iOS simulators and simulator runtimes in this cleanup are deleted permanently through simctl and can't be put back.")
+    }
+
+    /// The ids of the picks `FileDeleter.deleteItems` deletes permanently instead of
+    /// moving to the Trash. Same split the engine uses: runtimes by path, devices by
+    /// the CoreSimulator device-folder shape. The confirm sheet lists these on their
+    /// own, so what it promises can't drift from what the engine does (#170).
+    func permanentlyDeletedCandidateIDs(in candidates: [DeletionCandidate]) -> Set<String> {
+        let runtimePaths = Set(simulatorRuntimeIDsByPath().keys)
+        return Set(candidates.lazy
+            .filter { FileDeleter.removesDirectly($0.path, simulatorRuntimePaths: runtimePaths) }
+            .map(\.id))
+    }
+
+    private func confirmationRemovesSimulators(_ candidates: [DeletionCandidate]) -> Bool {
+        !permanentlyDeletedCandidateIDs(in: candidates).isEmpty
+    }
+
+    private func beginManualDeletionPipeline(with picks: [DeletionCandidate]) {
+        stagedDeletionCandidates = picks
+        stagedDeletionTrigger = .manual
+        runPostConfirmationFrictionPipeline()
+    }
+
+    func cancelDeletionFrictionFlow() {
+        stagedDeletionCandidates = nil
+        showMissingLockfileFriction = false
+        showUncommittedGitFriction = false
+    }
+
+    func acknowledgeMissingLockfileRisk() {
+        showMissingLockfileFriction = false
+        continueAfterLockfileFriction()
+    }
+
+    func acknowledgeUncommittedGitRisk() {
+        showUncommittedGitFriction = false
+        Task { await executeStagedDeletion(trigger: stagedDeletionTrigger) }
+    }
+
+    private func runPostConfirmationFrictionPipeline() {
+        guard let staged = stagedDeletionCandidates else { return }
+        if staged.contains(where: \.needsReinstallFriction) {
+            showMissingLockfileFriction = true
+            return
+        }
+        continueAfterLockfileFriction()
+    }
+
+    private func continueAfterLockfileFriction() {
+        guard let staged = stagedDeletionCandidates else { return }
+        if staged.contains(where: \.needsUncommittedGitFriction) {
+            showUncommittedGitFriction = true
+            return
+        }
+        Task { await executeStagedDeletion(trigger: stagedDeletionTrigger) }
+    }
+
+    private func executeStagedDeletion(trigger: CleanupTrigger) async {
+        guard let staged = stagedDeletionCandidates else { return }
+        stagedDeletionCandidates = nil
+        guard claimConfirmedCleanOrExplain() else { return }
+        // Same rule as safe cleanup: a row from a full scan whose access has since
+        // been turned off stays where it is. Moving it would prompt.
+        let access = currentScanAccess()
+        let candidates = staged.filter {
+            ProtectedLocations.isReadable($0.path, access: access) && !ExcludedPathsStore.isExcluded($0.path)
+                && !($0.simulatorRuntime?.isExcluded ?? false)
+        }
+        let urls = candidates.map(\.path).map(\.standardizedFileURL)
+        guard !urls.isEmpty else { return }
+
+        var pathToDisplayName: [String: String] = [:]
+        var pathToExpectedSizeBytes: [String: Int64] = [:]
+        for candidate in candidates {
+            let key = candidate.path.standardizedFileURL.path
+            pathToDisplayName[key] = candidate.title
+            pathToExpectedSizeBytes[key] = candidate.sizeBytes
+        }
+        let simulatorRuntimeIDsByPath = self.simulatorRuntimeIDsByPath()
+
+        // Present the cleanup overlay in its cleaning phase for interactive runs.
+        // Totals come from the selected items, before the engine starts.
+        let presentsSession = trigger == .manual
+            && !defaults.bool(forKey: Self.pendingOnboardingCelebrationKey)
+        let progressBuffer = DeletionProgressBuffer()
+        var session: DeletionSession?
+        var progressPoller: Task<Void, Never>?
+        if presentsSession {
+            let totalBytes = candidates.reduce(Int64(0)) { $0 + $1.sizeBytes }
+            let liveSession = DeletionSession(totalBytes: totalBytes, totalItems: urls.count)
+            manualDeletionSession = liveSession
+            session = liveSession
+            progressPoller = liveSession.pollProgress(from: progressBuffer)
+        }
+
+        isDeleting = true
+        errorMessage = nil
+        defer {
+            isDeleting = false
+            progressPoller?.cancel()
+        }
+        let engineStart = Date()
+        do {
+            var onProgress: (@Sendable (DeletionProgressEvent) -> Void)?
+            if presentsSession {
+                onProgress = { @Sendable event in progressBuffer.ingest(event) }
+            }
+            let report = try await fileDeleter.deleteItems(
+                at: urls,
+                pathToDisplayName: pathToDisplayName,
+                pathToExpectedSizeBytes: pathToExpectedSizeBytes,
+                simulatorRuntimeIDsByPath: simulatorRuntimeIDsByPath,
+                onProgress: onProgress
+            )
+            let elapsedSeconds = Date().timeIntervalSince(engineStart)
+            let movedBytes = report.bytesMovedToTrash
+            incrementMovedToTrashTotal(by: movedBytes)
+            deselectSkippedItems(report.skippedItems)
+            reflectDeletionReportInScanState(report)
+            clearAllSelections()
+            if defaults.bool(forKey: Self.pendingOnboardingCelebrationKey) {
+                publishOnboardingCelebrationIfNeeded(movedToTrashBytes: movedBytes)
+            } else {
+                lastDeletionReport = report
+            }
+            progressPoller?.cancel()
+            // The overlay's figure is what the clean removed. The live count already
+            // included simulators and runtimes, which go outright rather than to the
+            // Trash, so the final figure keeps them in too instead of dropping to 0.
+            // The Trash footer stays keyed to `movedToTrashCount`.
+            session?.completeRun(
+                bytesMovedToTrash: movedBytes + report.bytesRemovedDirectly,
+                elapsedSeconds: elapsedSeconds,
+                failedItems: report.userVisibleFailures,
+                movedToTrashCount: report.movedToTrashCount,
+                removedPermanentlyCount: report.deletedItems.count - report.movedToTrashCount
+            )
+            // Only the helper's moves can leave root-owned files in the Trash.
+            if !report.ownershipWarningPaths.isEmpty { session?.noteTrashOwnershipWarning() }
+            for kept in report.keptRuntimeDownloads {
+                session?.addNote(kept.note)
+            }
+            recordCleanup(report, trigger: trigger, source: .clean)
+        } catch {
+            if session != nil {
+                manualDeletionSession = nil
+            }
+            errorMessage = trigger == .scheduled
+                ? String(localized: "Scheduled cleaning couldn’t finish. Open the app to try manually.")
+                : String(localized: "Unable to clean selected items. Please try again.")
+        }
+    }
+
+    func dismissManualDeletionSession() {
+        manualDeletionSession = nil
+    }
+
+    /// Retries deletion for a single failed item from the completion overlay. The
+    /// row goes back through the route that tried it (#174), so the same gate
+    /// decides again and a retry never reaches further than the clean did. Returns
+    /// the bytes that went, or `nil` when the row is still there or was already gone.
+    func retryCleanFailure(_ item: CleanFailureItem, session: DeletionSession) async -> Int64? {
+        let url = URL(fileURLWithPath: item.path)
+        let key = url.standardizedFileURL.path
+
+        // Leftover macOS update files, whatever the reason, go back through the clean
+        // route together; see `retryInstallLeftoverFailures`.
+        if MacOSInstallLeftovers.isEntryPath(key) {
+            return await retryInstallLeftoverFailures([item], session: session)
+        }
+        // Every clean checks this before it starts. A retry is no exception, and
+        // the row says so rather than keeping a Retry that does nothing.
+        let runtime = simulatorRuntimes.first { $0.locationURL.standardizedFileURL.path == key }
+        guard !ExcludedPathsStore.isExcluded(url),
+              !(runtime.map { ExcludedSimulatorRuntimesStore.isExcluded(imageID: $0.id, build: $0.build) } ?? false)
+        else {
+            if item.reason != .safetySkipped {
+                session.replaceFailure(id: item.id, with: [item.replacingReason(.safetySkipped)])
+            }
+            return nil
+        }
+        // A leftover's owner can come back between the clean and the retry, or
+        // another app that shares its files can be installed. The clean checked
+        // that before anything moved; the retry checks it again.
+        if case .userSelected(isAIModel: false, _) = item.route, await leftoverIsClaimedNow(at: url) {
+            session.replaceFailure(id: item.id, with: [item.replacingReason(.keptForOtherApp)])
+            return nil
+        }
+
+        switch item.route {
+        case .lockedUninstall:
+            // A whole app held back because its bundle is locked.
+            // Removing it goes through the helper and takes the bundle *and* the
+            // leftovers we deferred with it, so nothing is stripped until the app can go.
+            return await completeLockedUninstall(for: item, session: session)
+        case .userSelected(isAIModel: _, privilegedEligible: true) where item.reason == .needsAdministrator:
+            // A leftover only the helper can move. As for a held app, the first tap
+            // is the setup step; the engine tries the helper on the next one.
+            guard helperIsEnabled() else {
+                enableHelper()
+                return nil
+            }
+        case .cache, .userSelected:
+            break
+        }
+
+        let outcome = await fileDeleter.retryDeleteItem(
+            at: url,
+            displayName: item.displayName,
+            expectedSizeBytes: item.sizeBytes,
+            route: item.route,
+            simulatorRuntimeID: simulatorRuntimeIDsByPath()[key]
+        )
+        switch outcome {
+        case .deleted(let bytes, let movedToTrash, let remaining, let keptRuntimeDownloads):
+            resolveRetriedFailure(
+                item: item,
+                bytes: bytes,
+                movedToTrash: movedToTrash,
+                remaining: remaining,
+                session: session
+            )
+            for kept in keptRuntimeDownloads {
+                session.addNote(kept.note)
+            }
+            return bytes
+        case .alreadyGone:
+            // Something else removed it since the clean. The row goes, nothing is
+            // credited or recorded, and every list stops showing it.
+            session.removeResolvedFailure(id: item.id, additionalMovedBytes: 0)
+            removeScanRows { $0.standardizedFileURL.path == key }
+            removeUserSelectedRows(deletedPaths: [key])
+            return nil
+        case .failed(let reason):
+            // The row shows what this attempt found. A gate's refusal reads as
+            // skipped for safety, which offers no Retry.
+            if reason != item.reason {
+                session.replaceFailure(id: item.id, with: [item.replacingReason(reason)])
+            }
+            return nil
+        }
+    }
+
+    /// Retries leftover macOS update files in one helper request (#127). Retrying them
+    /// one by one would fail after the first: every move changes the folder's date,
+    /// and the helper refuses the rest of the folder after that. If the helper is not
+    /// on yet, this tap is the setup step, as it is for a locked app.
+    func retryInstallLeftoverFailures(_ items: [CleanFailureItem], session: DeletionSession) async -> Int64? {
+        guard !items.isEmpty else { return nil }
+        guard helperIsEnabled() else {
+            enableHelper()
+            return nil
+        }
+
+        var pathToDisplayName: [String: String] = [:]
+        var pathToExpectedSizeBytes: [String: Int64] = [:]
+        var itemsByPath: [String: CleanFailureItem] = [:]
+        for item in items {
+            let key = URL(fileURLWithPath: item.path).standardizedFileURL.path
+            pathToDisplayName[key] = item.displayName
+            pathToExpectedSizeBytes[key] = item.sizeBytes
+            itemsByPath[key] = item
+        }
+        guard let report = try? await fileDeleter.deleteItems(
+            at: items.map { URL(fileURLWithPath: $0.path) },
+            pathToDisplayName: pathToDisplayName,
+            pathToExpectedSizeBytes: pathToExpectedSizeBytes
+        ) else { return nil }
+
+        var movedBytes: Int64 = 0
+        for deleted in report.deletedItems {
+            let key = URL(fileURLWithPath: deleted.path).standardizedFileURL.path
+            guard let item = itemsByPath[key] else { continue }
+            resolveRetriedFailure(
+                item: item,
+                bytes: deleted.sizeBytes,
+                movedToTrash: deleted.movedToTrash,
+                remaining: [],
+                session: session
+            )
+            movedBytes += deleted.sizeBytes
+        }
+        // What didn't move gets its new reason, so the screen never keeps offering a
+        // button that would only do the same thing again. A skip means the folder no
+        // longer passes the date rule, which no retry can change.
+        var newReasons: [String: CleanFailureReason] = [:]
+        for failed in report.failedItems {
+            newReasons[URL(fileURLWithPath: failed.path).standardizedFileURL.path] = failed.reason
+        }
+        for skipped in report.skippedItems {
+            newReasons[URL(fileURLWithPath: skipped.path).standardizedFileURL.path] = .safetySkipped
+        }
+        for (key, reason) in newReasons {
+            guard let item = itemsByPath[key], item.reason != reason else { continue }
+            session.replaceFailure(id: item.id, with: [CleanFailureItem(
+                path: item.path,
+                displayName: item.displayName,
+                reason: reason,
+                sizeBytes: item.sizeBytes
+            )])
+        }
+        if !report.ownershipWarningPaths.isEmpty { session.noteTrashOwnershipWarning() }
+        return movedBytes > 0 ? movedBytes : nil
+    }
+
+    /// Shared bookkeeping once a retried failure goes: credit the bytes, drop it
+    /// from every list that showed it, and clear it from the overlay. A folder
+    /// emptied entry by entry can go only in part; its entries that still failed
+    /// take the row's place, each with its own reason and Retry. A simulator or
+    /// runtime is filed as removed outright, not as moved to the Trash.
+    private func resolveRetriedFailure(
+        item: CleanFailureItem,
+        bytes: Int64,
+        movedToTrash: Bool,
+        remaining: [FailedDeletionItem],
+        session: DeletionSession
+    ) {
+        if remaining.isEmpty {
+            session.removeResolvedFailure(id: item.id, additionalMovedBytes: bytes)
+        } else {
+            session.replaceFailure(id: item.id, with: remaining.map(CleanFailureItem.init(failed:)))
+            session.addRetriedMovedBytes(bytes)
+        }
+        if movedToTrash {
+            session.noteMovedToTrash(count: 1)
+            incrementMovedToTrashTotal(by: bytes)
+        } else {
+            session.noteRemovedPermanently(count: 1)
+        }
+        let deleted = DeletedItem(
+            path: item.path,
+            sizeBytes: bytes,
+            displayName: item.displayName,
+            movedToTrash: movedToTrash
+        )
+        let report = DeletionReport(
+            bytesMovedToTrash: movedToTrash ? bytes : 0,
+            bytesRemovedDirectly: movedToTrash ? 0 : bytes,
+            deletedItems: [deleted],
+            failedItems: remaining,
+            skippedItems: [],
+            capacityBefore: nil,
+            capacityAfter: nil,
+            timestamp: Date()
+        )
+        reflectDeletionReportInScanState(report)
+        removeUserSelectedRows(deletedPaths: [URL(fileURLWithPath: item.path).standardizedFileURL.path])
+        recordCleanup(report, trigger: .manual, source: .retry, addToHistory: false)
+    }
+
+    /// Drops the rows `reflectDeletionReportInScanState` does not know: Large Files
+    /// rows, with their duplicate groups, and orphan leftovers. `deletedPaths` are
+    /// standardized. A Large Files row stands for every path in it, and goes once
+    /// none of them is left: the one just retried, and any the clean or an earlier
+    /// retry already took, which are gone from disk.
+    private func removeUserSelectedRows(deletedPaths: Set<String>) {
+        let clearedRows = largeFiles.filter { row in
+            row.componentPaths.contains { deletedPaths.contains($0.path) }
+                && row.componentPaths.allSatisfy {
+                    deletedPaths.contains($0.path) || !FileManager.default.fileExists(atPath: $0.path)
+                }
+        }
+        if !clearedRows.isEmpty { removeClearedLargeFileRows(clearedRows) }
+        removeOrphanLeftoverRows(deletedPaths: deletedPaths)
+    }
+
+    /// Takes trashed paths off every tab, not only the one the clean started from.
+    /// An app's caches also show in App Caches and Dev Tools, and an uninstall or
+    /// leftover cleanup left those rows up (#183). A row inside a trashed folder
+    /// goes too: it went to the Trash with the folder. `deletedPaths` are
+    /// standardized.
+    private func removeTrashedRowsEverywhere(deletedPaths: Set<String>) {
+        guard !deletedPaths.isEmpty else { return }
+        removeScanRows { url in
+            let path = url.standardizedFileURL.path
+            return deletedPaths.contains { PathContainment.isSameOrInside(path, $0) }
+        }
+        removeUserSelectedRows(deletedPaths: deletedPaths)
+    }
+
+    /// Whether an app claims a leftover now. The clean checked that before anything
+    /// moved. A retry can come minutes later, after the app was put back or another
+    /// app that shares its files was installed, so it checks again, against a fresh
+    /// listing rather than the one on screen. Only a leftover path is checked: a
+    /// Large Files row or a model component has no owner to come back.
+    private func leftoverIsClaimedNow(at url: URL) async -> Bool {
+        guard let category = AppUninstallScanPolicy.leftoverCategory(for: url) else { return false }
+        if let bundleID = Self.bundleIDNaming(url, category: category) {
+            let present = await Task.detached(priority: .userInitiated) {
+                OrphanLeftoverScanPolicy.isOwnerPresent(bundleID: bundleID)
+            }.value
+            if present { return true }
+        }
+        var apps: [InstalledApp] = []
+        for await app in uninstallScanner.installedAppsStream() {
+            apps.append(app)
+        }
+        let probe = UninstallItem(
+            path: url,
+            sizeBytes: 0,
+            category: category,
+            safetyInfo: SafetyInfo(
+                level: .medium,
+                headline: url.lastPathComponent,
+                explanation: "",
+                recoverySteps: "",
+                reinstallCommand: nil
+            ),
+            matchReason: .bundleID,
+            isSelected: false
+        )
+        let claims = await AppGroupClaims.gatherOffMain(for: apps, leftovers: [probe])
+        return Self.appClaimingLeftover(at: url, among: apps, appGroupClaims: claims) != nil
+    }
+
+    /// The installed app, if any, that a leftover belongs to by the uninstaller's
+    /// own matching rules: its name is anchored to the app's bundle id or display
+    /// name, or an app lists its group. No app is excused, since the app whose
+    /// removal left it is no longer installed.
+    nonisolated static func appClaimingLeftover(
+        at url: URL,
+        among apps: [InstalledApp],
+        appGroupClaims: AppGroupClaims,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> InstalledApp? {
+        guard let category = AppUninstallScanPolicy.leftoverCategory(for: url, home: home) else { return nil }
+        return AppUninstallScanPolicy.claimant(
+            forLeftoverName: url.lastPathComponent,
+            category: category,
+            ownerID: "",
+            among: apps,
+            appGroupClaims: appGroupClaims
+        )
+    }
+
+    /// The bundle id a leftover is named after, in the roots keyed that way, so
+    /// Launch Services can say whether that app is back. `nil` where the name is
+    /// something else, such as a group container or a launch agent's own label.
+    nonisolated static func bundleIDNaming(_ url: URL, category: UninstallCategory) -> String? {
+        let name = url.lastPathComponent
+        switch category {
+        case .preferences:
+            return name.hasSuffix(".plist") ? String(name.dropLast(".plist".count)) : nil
+        case .savedState:
+            return name.hasSuffix(".savedState") ? String(name.dropLast(".savedState".count)) : nil
+        case .containers:
+            return name
+        case .applicationSupport, .caches, .logs:
+            return name.contains(".") && !name.contains(" ") ? name : nil
+        case .bundle, .groupContainers, .launchAgents, .launchDaemons, .homeFolderData, .other:
+            return nil
+        }
+    }
+
+    /// Takes the orphan leftovers whose standardized path is in `deletedPaths` off
+    /// the Leftovers list and out of its selection.
+    private func removeOrphanLeftoverRows(deletedPaths: Set<String>) {
+        let clearedIDs = Set(
+            orphanLeftovers
+                .filter { deletedPaths.contains($0.path.standardizedFileURL.path) }
+                .map(\.id)
+        )
+        removeLastScanRows { deletedPaths.contains($0.path) }
+        forgetInLastScanFile(paths: deletedPaths)
+        guard !clearedIDs.isEmpty else { return }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            orphanLeftovers.removeAll { clearedIDs.contains($0.id) }
+        }
+        orphanSelectedIDs.subtract(clearedIDs)
+    }
+
+    /// What a held app's row says, read from its bundle's own attempt (#299). One-time
+    /// setup (`.needsAdministrator`) only when the helper isn't on, since the engine
+    /// says so only then. A bundle the gate refused is skipped for safety. "Needs
+    /// Full Disk Access" never: it guards user data, not app folders, and the helper
+    /// runs without it. A bundle with no record of its own reads as unknown.
+    static func heldAppReason(bundlePath: String, in report: DeletionReport?) -> CleanFailureReason {
+        func isBundle(_ path: String) -> Bool {
+            URL(fileURLWithPath: path).standardizedFileURL.path == bundlePath
+        }
+        guard let report else { return .unknown }
+        if report.skippedItems.contains(where: { isBundle($0.path) }) { return .safetySkipped }
+        guard let failure = report.failedItems.first(where: { isBundle($0.path) }) else { return .unknown }
+        return failure.reason == .needsFullDiskAccess ? .unknown : failure.reason
+    }
+
+    /// Finishes a deferred locked-app uninstall. Removes the bundle first; only if it
+    /// actually moves are the leftovers held with it trashed, so an app is never gutted
+    /// while it stays put. A row waiting on setup makes this tap the setup step, and the
+    /// app stays pending until the user approves it. Any other row tries the move again,
+    /// so the tap does what its Retry says (#299). If the bundle still won't move, the
+    /// whole pending unit is left untouched and the row says why. A bundle the user
+    /// already removed in Finder counts as moved.
+    private func completeLockedUninstall(for item: CleanFailureItem, session: DeletionSession) async -> Int64? {
+        let bundleKey = URL(fileURLWithPath: item.path).standardizedFileURL.path
+        // Only a held app the uninstaller planned may run bundle first. A leftover
+        // row carries its own route and never comes here (#174).
+        guard let pending = pendingLockedUninstalls.first(where: { $0.bundlePath == bundleKey }) else {
+            return nil
+        }
+        let leftovers = pending.items.filter { $0.category != .bundle }
+        let bundleURL = pending.app.bundleURL
+        let bundleName = pending.app.name
+
+        // The row offers Finder, so the bundle may be gone by the time Retry is
+        // tapped. Gone counts as removed only when no live copy of the app is left
+        // anywhere: a copy the user dragged elsewhere still reads these leftovers,
+        // so the whole unit stays.
+        let removedInFinder = !FileManager.default.fileExists(atPath: bundleKey)
+        if removedInFinder, RemovedAppWatchPolicy.otherCopyExists(of: pending.app) { return nil }
+
+        if !removedInFinder, item.reason == .needsAdministrator, !helperIsEnabled() {
+            enableHelper()
+            return nil
+        }
+
+        // Pass 1 — the bundle, on its own. It is always helper-eligible: the validated
+        // .app the user chose to remove, which a managed installer can protect even in
+        // a writable /Applications, with or without Full Disk Access (#299). Not one
+        // leftover is touched until the bundle moves.
+        let bundleSize = pending.items.first(where: { $0.category == .bundle })?.sizeBytes ?? item.sizeBytes
+        let bundleReport: DeletionReport
+        if removedInFinder {
+            bundleReport = DeletionReport(
+                bytesMovedToTrash: 0,
+                bytesRemovedDirectly: 0,
+                deletedItems: [],
+                failedItems: [],
+                skippedItems: [],
+                capacityBefore: nil,
+                capacityAfter: nil,
+                timestamp: Date()
+            )
+            removeLastScanRows { $0.path == bundleKey || $0.path == item.path }
+            forgetInLastScanFile(paths: [bundleKey, item.path])
+        } else {
+            RemovedAppMonitor.shared.noteRemovalByPurge(of: [bundleURL])
+            guard let report = try? await fileDeleter.deleteUserSelectedFiles(
+                at: [bundleURL],
+                pathToDisplayName: [bundleKey: bundleName],
+                pathToExpectedSizeBytes: [bundleKey: bundleSize],
+                privilegedEligiblePaths: [bundleKey],
+                privilegedBundlePaths: [bundleKey]
+            ) else { return nil }
+            bundleReport = report
+        }
+
+        let bundleMoved = removedInFinder || bundleReport.deletedItems.contains {
+            URL(fileURLWithPath: $0.path).standardizedFileURL.path == bundleKey
+        }
+        guard bundleMoved else {
+            // Still can't move the bundle. Leave the whole pending unit intact so no
+            // leftover is trashed while the app stays put. The row now says what the
+            // move ran into, so a tap that changed nothing still shows why (#299).
+            let reason = Self.heldAppReason(bundlePath: bundleKey, in: bundleReport)
+            if reason != item.reason {
+                session.replaceFailure(id: item.id, with: [item.replacingReason(reason)])
+            }
+            return nil
+        }
+
+        installedApps.removeAll { $0.bundleURL.standardizedFileURL.path == bundleKey }
+        pendingLockedUninstalls.removeAll { $0.bundlePath == bundleKey }
+
+        // A leftover that another still-installed app also claims is held back, so
+        // finishing this app's removal never strips files a surviving copy needs.
+        // The removed app is already out of `installedApps` above.
+        var keptSharedFailures: [CleanFailureItem] = []
+        let owner = pending.app
+        let survivors = installedApps
+        let appGroupClaims = await AppGroupClaims.gatherOffMain(for: survivors, leftovers: leftovers)
+        let claimants = await survivorsWithProtectedApps(survivors, removing: [bundleKey])
+        let deletableLeftovers = leftovers.filter { leftover in
+            if let otherApp = Self.appStillUsing(
+                leftover: leftover,
+                excludingOwner: owner,
+                among: claimants,
+                appGroupClaims: appGroupClaims
+            ) {
+                keptSharedFailures.append(keptSharedFailure(item: leftover, otherApp: otherApp))
+                return false
+            }
+            return true
+        }
+
+        // Pass 2 — the leftovers, now that the app is actually gone. Each escalates
+        // only when its own parent directory is not writable.
+        var leftoverReport: DeletionReport?
+        var eligible = Set<String>()
+        if !deletableLeftovers.isEmpty {
+            var names: [String: String] = [:]
+            var sizes: [String: Int64] = [:]
+            for leftover in deletableLeftovers {
+                let key = leftover.path.standardizedFileURL.path
+                names[key] = "\(bundleName) \(leftover.category.displayName)"
+                sizes[key] = leftover.sizeBytes
+                if pathNeedsPrivilege(leftover.path) { eligible.insert(key) }
+            }
+            leftoverReport = try? await fileDeleter.deleteUserSelectedFiles(
+                at: deletableLeftovers.map(\.path),
+                pathToDisplayName: names,
+                pathToExpectedSizeBytes: sizes,
+                privilegedEligiblePaths: eligible
+            )
+        }
+
+        let movedBytes = bundleReport.bytesMovedToTrash + (leftoverReport?.bytesMovedToTrash ?? 0)
+        if movedBytes > 0 {
+            session.addRetriedMovedBytes(movedBytes)
+            incrementMovedToTrashTotal(by: movedBytes)
+        }
+        if !bundleReport.ownershipWarningPaths.isEmpty
+            || !(leftoverReport?.ownershipWarningPaths.isEmpty ?? true) {
+            session.noteTrashOwnershipWarning()
+        }
+        let report = DeletionReport(
+            bytesMovedToTrash: movedBytes,
+            bytesRemovedDirectly: 0,
+            deletedItems: bundleReport.deletedItems + (leftoverReport?.deletedItems ?? []),
+            failedItems: leftoverReport?.failedItems ?? [],
+            skippedItems: leftoverReport?.skippedItems ?? [],
+            capacityBefore: nil,
+            capacityAfter: nil,
+            timestamp: Date()
+        )
+        reflectDeletionReportInScanState(report)
+        session.noteMovedToTrash(count: report.movedToTrashCount)
+        recordCleanup(report, trigger: .manual, source: .uninstall, addToHistory: false)
+
+        // The app is gone. Any leftover that still failed becomes its own plain row,
+        // no longer described as a locked application, on the user-selected route
+        // with the same helper eligibility, so Retry tries it the same way (#174).
+        let movedLeftoverPaths = Set((leftoverReport?.deletedItems ?? []).map {
+            URL(fileURLWithPath: $0.path).standardizedFileURL.path
+        })
+        let failedLeftovers = deletableLeftovers.filter {
+            !movedLeftoverPaths.contains($0.path.standardizedFileURL.path)
+        }
+        var reportReasons = (leftoverReport?.failedItems ?? []).reduce(into: [String: CleanFailureReason]()) {
+            reasons, failure in
+            reasons[URL(fileURLWithPath: failure.path).standardizedFileURL.path] = failure.reason
+        }
+        // A leftover the gate refused is skipped for safety, not a failure to retry.
+        for skipped in leftoverReport?.skippedItems ?? [] {
+            reportReasons[URL(fileURLWithPath: skipped.path).standardizedFileURL.path] = .safetySkipped
+        }
+        let failedReplacements = failedLeftovers.map { leftover -> CleanFailureItem in
+            let key = leftover.path.standardizedFileURL.path
+            let reported = reportReasons[key] ?? .unknown
+            // With the helper on, "needs administrator" only means its move failed, and
+            // Retry on the plain row tries the helper again. With it off (the bundle
+            // moved without it), the row keeps offering setup.
+            let reason: CleanFailureReason = reported == .needsAdministrator && helperIsEnabled() ? .unknown : reported
+            return CleanFailureItem(
+                path: leftover.path.path,
+                displayName: "\(bundleName) \(leftover.category.displayName)",
+                reason: reason,
+                sizeBytes: leftover.sizeBytes,
+                route: .userSelected(isAIModel: false, privilegedEligible: eligible.contains(key))
+            )
+        }
+        // Both the leftovers that failed and the ones kept for another app remain as
+        // rows; when neither exists, the whole "needs your OK" row is resolved.
+        let replacements = failedReplacements + keptSharedFailures
+        if replacements.isEmpty {
+            session.removeResolvedFailure(id: item.id, additionalMovedBytes: 0)
+        } else {
+            session.replaceFailure(id: item.id, with: replacements)
+        }
+
+        return movedBytes > 0 ? movedBytes : nil
+    }
+
+    /// Updates in-memory scan results so removed folders disappear without requiring a full rescan
+    /// (e.g. after **Done** on the summary sheet, which no longer triggers `scanAll()`).
+    private func reflectDeletionReportInScanState(_ report: DeletionReport) {
+        let deletedPaths = Set(report.deletedItems.map { URL(fileURLWithPath: $0.path).standardizedFileURL.path })
+        guard !deletedPaths.isEmpty else { return }
+        removeScanRows { deletedPaths.contains($0.standardizedFileURL.path) }
+        forgetInLastScanFile(paths: deletedPaths.union(report.deletedItems.map(\.path)))
+    }
+
+    /// Full Disk Access was turned off with a full scan's rows still up. Those rows
+    /// point into folders Purge can no longer read, so they go now rather than sit
+    /// next to the "Limited scan" notice, counted in totals and offered by Clean
+    /// buttons that would then skip them. Uses the same rule as the scans and the
+    /// cleanups, symlinks included.
+    private func dropRowsLockedByRevokedAccess() {
+        // `isReadable` reads links only. Standardizing the path first would stat
+        // it, and through a symlink into Documents that stat is itself the prompt.
+        removeScanRows { !isReadableWithoutFullDiskAccess($0) }
+        scanSelection.cacheIDs.formIntersection(cacheItems.map(\.id))
+        scanSelection.artifactIDs.formIntersection(projectGroups.flatMap(\.artifacts).map(\.id))
+    }
+
+    private func isReadableWithoutFullDiskAccess(_ url: URL) -> Bool {
+        if let known = readableWithoutFullDiskAccess[url.path] { return known }
+        let readable = ProtectedLocations.isReadable(url, access: .limited)
+        readableWithoutFullDiskAccess[url.path] = readable
+        return readable
+    }
+
+    /// Drops every scan row whose path `isRemoved` matches, in place, so the lists
+    /// and totals update without a rescan. Paths are passed as stored, so a caller
+    /// that must not touch the disk never has to.
+    private func removeScanRows(where isRemoved: (URL) -> Bool) {
+        removeLastScanRows(where: isRemoved)
+        stagedGeneralCacheItems = stagedGeneralCacheItems.compactMap { item in
+            let remaining = item.locations.filter { !isRemoved($0.path) }
+            guard !remaining.isEmpty else { return nil }
+            guard remaining.count != item.locations.count else { return item }
+            return item.withLocations(remaining)
+        }
+
+        withAnimation(.easeInOut(duration: 0.2)) {
+            cacheItems = cacheItems.compactMap { item in
+                let remaining = item.locations.filter { !isRemoved($0.path) }
+                guard !remaining.isEmpty else { return nil }
+                guard remaining.count != item.locations.count else { return item }
+                return item.withLocations(remaining)
+            }
+
+            devTools = devTools.map { tool in
+                let remainingPaths = tool.paths.filter { !isRemoved($0) }
+                let pathSizes = tool.pathSizeBytesByPath.filter { key, _ in
+                    remainingPaths.contains { $0.standardizedFileURL.path == key }
+                }
+                let newSize = pathSizes.values.reduce(Int64(0), +)
+                let stillDetected = !remainingPaths.isEmpty && newSize > 0
+                if remainingPaths.count == tool.paths.count,
+                   newSize == tool.sizeBytes,
+                   stillDetected == tool.isDetected {
+                    return tool
+                }
+                return DevTool(
+                    definitionKey: tool.definitionKey,
+                    toolName: tool.toolName,
+                    paths: remainingPaths,
+                    sizeBytes: newSize,
+                    pathSizeBytesByPath: pathSizes,
+                    lastModified: tool.lastModified,
+                    isSelected: false,
+                    isDetected: stillDetected,
+                    safetyInfo: tool.safetyInfo,
+                    reinstallSafety: tool.reinstallSafety
+                )
+            }
+            // Selection is id-keyed and separate; drop any tool that's no longer detected.
+            let detectedToolIDs = Set(devTools.filter(\.isDetected).map(\.id))
+            scanSelection.devToolIDs.formIntersection(detectedToolIDs)
+
+            simulatorDevices.removeAll { isRemoved($0.folderURL) }
+            runningSimulatorDevices.removeAll { isRemoved($0.folderURL) }
+            simulatorRuntimes.removeAll { isRemoved($0.locationURL) }
+
+            var groups = projectGroups
+            for gi in groups.indices {
+                groups[gi].artifacts.removeAll { isRemoved($0.path) }
+            }
+            projectGroups = groups.filter { !$0.artifacts.isEmpty }
+        }
+
+        devToolRepoStatusByPath = devToolRepoStatusByPath.filter { !isRemoved(URL(fileURLWithPath: $0.key)) }
+
+        if lastScanCompletedAt != nil {
+            persistLastScanSafeRecoverableBytes()
+        }
+    }
+
+    private func clearAllSelections() {
+        scanSelection.removeAll()
+    }
+
+    /// Drop any selections that the safety policy rejected so they don't keep
+    /// reappearing in the staged set on the next confirmation.
+    private func deselectSkippedItems(_ skipped: [SkippedDeletionItem]) {
+        guard !skipped.isEmpty else { return }
+        let skippedPaths = Set(skipped.map { URL(fileURLWithPath: $0.path).standardizedFileURL.path })
+        guard !skippedPaths.isEmpty else { return }
+
+        for item in cacheItems where item.locations.contains(where: { skippedPaths.contains($0.path.standardizedFileURL.path) }) {
+            scanSelection.cacheIDs.remove(item.id)
+        }
+
+        for tool in devTools where tool.paths.contains(where: { skippedPaths.contains($0.standardizedFileURL.path) }) {
+            scanSelection.devToolIDs.remove(tool.id)
+        }
+
+        for device in simulatorDevices where skippedPaths.contains(device.folderURL.standardizedFileURL.path) {
+            scanSelection.simulatorIDs.remove(device.id)
+        }
+
+        for runtime in simulatorRuntimes where skippedPaths.contains(runtime.locationURL.standardizedFileURL.path) {
+            scanSelection.simulatorRuntimeIDs.remove(runtime.id)
+        }
+
+        for artifact in projectGroups.flatMap(\.artifacts)
+        where skippedPaths.contains(artifact.path.standardizedFileURL.path) {
+            scanSelection.artifactIDs.remove(artifact.id)
+        }
+    }
+
+    // MARK: - Large & Old Files
+
+    var selectedLargeFiles: [LargeFile] {
+        let ids = largeFileSelection.ids
+        return largeFiles.filter { ids.contains($0.id) }
+    }
+
+    /// The selected rows Delete Selected acts on. A file from iCloud Drive's own
+    /// folder is offered for Remove Download only, so it never counts here.
+    var selectedTrashableLargeFiles: [LargeFile] {
+        selectedLargeFiles.filter(\.canMoveToTrash)
+    }
+
+    var selectedLargeFileCount: Int {
+        selectedTrashableLargeFiles.count
+    }
+
+    var selectedLargeFileBytes: Int64 {
+        selectedTrashableLargeFiles.reduce(Int64(0)) { $0 + $1.sizeBytes }
+    }
+
+    /// The selected rows Remove Download acts on.
+    var selectedRemovableDownloads: [LargeFile] {
+        selectedLargeFiles.filter(\.canRemoveDownload)
+    }
+
+    /// Whether the scan found any file whose download can be removed. The
+    /// Remove Download button shows only then, so a Mac without iCloud Drive
+    /// never sees it.
+    var hasRemovableDownloads: Bool {
+        largeFiles.contains(where: \.canRemoveDownload)
+    }
+
+    /// Duplicate groups the current selection would wipe out completely — every
+    /// copy checked, nothing left behind.
+    ///
+    /// Purge does not choose which copy survives (issue #17 is explicit that
+    /// picking which user document dies is not the app's judgement to make), so
+    /// this exists only to say plainly what the selection does before it happens.
+    var duplicateGroupsFullyConsumedBySelection: [DuplicateGroup] {
+        let index = largeFileDuplicates.index
+        guard !index.isEmpty else { return [] }
+        let selected = largeFileSelection.ids
+        guard !selected.isEmpty else { return [] }
+        return index.groups.filter { group in
+            group.fileIDs.allSatisfy { selected.contains($0) }
+        }
+    }
+
+    func scanLargeFilesIfNeeded() async {
+        refreshPermission()
+        guard hasFullDiskAccess else { return }
+        guard !isScanningLargeFiles, !hasCompletedLargeFileScan else { return }
+        await scanLargeFiles()
+    }
+
+    func scanLargeFiles() async {
+        refreshPermission()
+        guard hasFullDiskAccess else { return }
+        largeFileScanGeneration += 1
+        let generation = largeFileScanGeneration
+        isScanningLargeFiles = true
+        // Cleared for every scan, finished again only by a stream that ran to the
+        // end. A rescan that Stop cuts short then reads as unfinished: the Overview
+        // does not count its partial list, the saved record keeps the last full
+        // figures, and opening the tab scans again (#180).
+        hasCompletedLargeFileScan = false
+        completedLargeFileFilter = nil
+        largeFiles = []
+        largeFileScanSummary = nil
+        // New rows open on All. A chip picked for the old rows may hold nothing
+        // in these, such as Images after the size menu moved to 1 GB (#277).
+        largeFileCategoryFilter = LargeFileCategoryFilter.all
+        largeFileSelection.ids.removeAll()
+        duplicateScanTask?.cancel()
+        duplicateScanTask = nil
+        largeFileDuplicates.reset()
+        defer {
+            if largeFileScanGeneration == generation {
+                isScanningLargeFiles = false
+            }
+        }
+
+        let filter = largeFileFilter
+        let minBytes = filter.size.bytes
+        let staleDays = filter.age.days
+        var collected: [LargeFile] = []
+
+        // The scanner checks every file against the store before yielding it, off
+        // the main actor. What it can't see is an exclusion added after it yielded:
+        // a row already in `collected`, or one still in the stream's buffer. Every
+        // publish of `collected` would put those back, so when the list changes
+        // mid-scan, `collected` is pruned once and later arrivals get a string
+        // check against the new keys. No per-file lock or disk access on the main
+        // actor either way.
+        var seenExclusionRevision = exclusionRevision
+        var lateExclusions: ScanExclusions?
+        func syncExclusions() {
+            guard seenExclusionRevision != exclusionRevision else { return }
+            seenExclusionRevision = exclusionRevision
+            let current = ScanExclusions(keys: excludedPaths)
+            lateExclusions = current
+            collected.removeAll { current.covers(path: $0.id) }
+        }
+        func publish() {
+            syncExclusions()
+            largeFiles = collected.sorted { $0.sizeBytes > $1.sizeBytes }
+        }
+
+        // Models in known stores resolve from a handful of manifests and
+        // folders, so they land almost instantly — running them ahead of the
+        // file walk puts the biggest items on screen first instead of after a
+        // full home-directory sweep. The loose-weight sweep walks three large
+        // Library trees, so it starts now and runs beside the file walk; its
+        // rows are read once the walk ends. Dropping the stream on an early
+        // return cancels it. Models live outside the walked folders, so the
+        // exclusion check is per row.
+        let access: ScanAccess = hasFullDiskAccess ? .full : .limited
+        let looseWeights = scanSources.aiModels(minBytes, staleDays, access, .looseWeights)
+        for await model in scanSources.aiModels(minBytes, staleDays, access, .knownStores) {
+            guard largeFileScanGeneration == generation, !Task.isCancelled else { return }
+            guard !ExcludedPathsStore.isExcluded(model.path) else { continue }
+            collected.append(model)
+        }
+        publish()
+
+        var summary: LargeFileScanSummary?
+        for await event in scanSources.largeFiles(minBytes, staleDays) {
+            guard largeFileScanGeneration == generation, !Task.isCancelled else { return }
+            switch event {
+            case .file(let file):
+                syncExclusions()
+                if let lateExclusions, lateExclusions.covers(path: file.id) { continue }
+                collected.append(file)
+                if collected.count % 25 == 0 {
+                    publish()
+                }
+            case .finished(let finished):
+                summary = finished
+            }
+        }
+        for await model in looseWeights {
+            guard largeFileScanGeneration == generation, !Task.isCancelled else { return }
+            guard !ExcludedPathsStore.isExcluded(model.path) else { continue }
+            collected.append(model)
+        }
+        // Cancelling ends a `for await` quietly, so Stop during either wait
+        // lands here; a stopped scan never counts as complete.
+        guard largeFileScanGeneration == generation, !Task.isCancelled else { return }
+        publish()
+        largeFileScanSummary = summary
+        hasCompletedLargeFileScan = true
+        completedLargeFileFilter = filter
+        stampScanRecords([.largeFiles], largeFileFilter: filter)
+        recordedLargeFileSizes = Dictionary(largeFiles.map { ($0.id, ($0.sizeBytes, $0.category)) }, uniquingKeysWith: { first, _ in first })
+        // Delete extra copies trashes copies, so a file that can't go to the
+        // Trash takes no part in a duplicate set.
+        startDuplicateScan(for: largeFiles.filter(\.canMoveToTrash), generation: generation)
+    }
+
+    /// Looks for byte-identical copies among the finished scan results.
+    ///
+    /// Deliberately *after* the scan rather than inside it: hashing a pair of
+    /// 4 GB videos takes real time, and holding "Scanning…" open for it would
+    /// make every scan feel slower to pay for insight the user can wait a beat
+    /// for. The list is complete and usable while this runs.
+    private func startDuplicateScan(for files: [LargeFile], generation: Int) {
+        guard !files.isEmpty else { return }
+        largeFileDuplicates.beginChecking()
+        duplicateScanTask = Task { [duplicateDetector, largeFileDuplicates] in
+            let index = await duplicateDetector.findDuplicates(in: files)
+            // A superseded pass returns without touching the index at all: by the
+            // time it gets here a newer scan has already called `beginChecking()`,
+            // and clearing the flag would strand the newer pass with no
+            // "Checking for duplicates…" status while it is still running.
+            guard self.largeFileScanGeneration == generation else { return }
+            guard !Task.isCancelled else {
+                largeFileDuplicates.cancelChecking()
+                return
+            }
+            // Rows deleted while the pass was running must not come back as
+            // badges on rows that no longer exist.
+            let live = Set(self.largeFiles.map(\.id))
+            let vanished = Set(index.groupIDByFileID.keys.filter { !live.contains($0) })
+            largeFileDuplicates.finish(
+                with: index
+                    .removing(fileIDs: vanished)
+                    .withDisplaySizes(from: self.largeFiles)
+            )
+        }
+    }
+
+    func setLargeFileSelected(id: String, isSelected: Bool) {
+        if isSelected {
+            largeFileSelection.ids.insert(id)
+        } else {
+            largeFileSelection.ids.remove(id)
+        }
+    }
+
+    func setAllLargeFilesSelected(_ selected: Bool, ids: [String]) {
+        if selected {
+            largeFileSelection.ids.formUnion(ids)
+        } else {
+            largeFileSelection.ids.subtract(ids)
+        }
+    }
+
+    func presentLargeFileDeletionSheet() {
+        guard !selectedTrashableLargeFiles.isEmpty else { return }
+        showLargeFileDeletionSheet = true
+    }
+
+    /// Opens the Remove Download review for the selection, or for `file` alone
+    /// when it comes from a row's menu.
+    func requestRemoveDownloads(for file: LargeFile? = nil) {
+        if let file {
+            guard file.canRemoveDownload else { return }
+            pendingRemoveDownload = RemoveDownloadRequest(files: [file], fromSelection: false)
+            return
+        }
+        let selected = selectedLargeFiles
+        let files = selected.filter(\.canRemoveDownload)
+        guard !files.isEmpty else { return }
+        let leftOut = selected.filter { !$0.canRemoveDownload }
+        pendingRemoveDownload = RemoveDownloadRequest(
+            files: files,
+            localOnlyCount: leftOut.filter { !$0.syncsWithICloud }.count,
+            notReadyCount: leftOut.filter(\.syncsWithICloud).count
+        )
+    }
+
+    func dismissRemoveDownloads() {
+        pendingRemoveDownload = nil
+    }
+
+    func dismissRemoveDownloadResult() {
+        removeDownloadResult = nil
+    }
+
+    /// Removes the downloads of the confirmed files. Each file is checked again
+    /// from disk by the remover first. Rows whose download went come off the
+    /// list, since they no longer use space here; the result sheet and History
+    /// say they are still in iCloud.
+    func confirmRemoveDownloads() async {
+        guard let request = pendingRemoveDownload else { return }
+        pendingRemoveDownload = nil
+        // A row selected before its folder was excluded is left alone.
+        let targets = request.files.filter { !ExcludedPathsStore.isExcluded($0.path) }
+        guard !targets.isEmpty else { return }
+        guard claimConfirmedCleanOrExplain() else { return }
+
+        isDeleting = true
+        errorMessage = nil
+        defer { isDeleting = false }
+
+        let report = await iCloudDownloadRemover.removeDownloads(at: targets.map(\.path))
+        let removedIDs = Set(report.removed.map(\.path))
+        removeClearedLargeFileRows(largeFiles.filter { removedIDs.contains($0.id) })
+        if !report.removed.isEmpty {
+            CleanupHistoryStore.shared.appendICloudDownloadRemoval(report)
+        }
+        // Files this run skipped are listed on the sheet already, so they
+        // don't count as "other" files still selected.
+        let skippedIDs = Set(report.skipped.map(\.path))
+        removeDownloadResult = RemoveDownloadResult(
+            report: report,
+            stillSelectedCount: request.fromSelection
+                ? selectedLargeFiles.filter { !skippedIDs.contains($0.id) }.count
+                : 0
+        )
+    }
+
+    func dismissLargeFileDeletionSheet() {
+        showLargeFileDeletionSheet = false
+    }
+
+    /// Opens the duplicate-cleanup review: one keeper suggested per set, every
+    /// other copy bound for Trash. Nothing deletes here — the review names the rule
+    /// and shows the kept copy against the trashed ones, and the keeper is
+    /// changeable, so the app never removes a copy the user hasn't seen and agreed
+    /// to (issue #17).
+    ///
+    /// Takes only the sets the Duplicates list shows for `searchQuery`, so a
+    /// search narrows the review to what is on screen (#190).
+    func requestDuplicateCleanup(searchQuery: String = "") {
+        let index = largeFileDuplicates.index
+        guard !index.isEmpty else { return }
+        let sections = LargeFileCategoryFilter.duplicateSections(
+            in: largeFiles, query: searchQuery, duplicates: index
+        )
+        let sets: [DuplicateCopySet] = sections.map { section in
+            let copies = section.memberIndices.map { largeFiles[$0] }
+            let keeper = DuplicateKeeper.suggestedKeeperID(among: copies) ?? copies[0].id
+            return DuplicateCopySet(id: section.groupID, copies: copies, suggestedKeeperID: keeper)
+        }
+        guard !sets.isEmpty else { return }
+        pendingDuplicateCleanup = DuplicateCleanupRequest(sets: sets)
+    }
+
+    func dismissDuplicateCleanup() {
+        pendingDuplicateCleanup = nil
+    }
+
+    /// Trashes every copy except the chosen keeper in each set. `keeperByGroupID`
+    /// carries the user's final pick per set (defaulting to the suggestion). Runs
+    /// through the same delete path as the selection flow, so it gets the same
+    /// Trash safety, progress overlay, and history entry.
+    func confirmDuplicateCleanup(keeperByGroupID: [String: String]) async {
+        guard let request = pendingDuplicateCleanup else { return }
+        pendingDuplicateCleanup = nil
+        var targets: [LargeFile] = []
+        for copySet in request.sets {
+            let keeper = keeperByGroupID[copySet.id] ?? copySet.suggestedKeeperID
+            targets.append(contentsOf: copySet.copies.filter { $0.id != keeper })
+        }
+        await performLargeFileDeletion(targets: targets)
+    }
+
+    func confirmLargeFileDeletion() async {
+        showLargeFileDeletionSheet = false
+        await performLargeFileDeletion(targets: selectedTrashableLargeFiles)
+    }
+
+    private func performLargeFileDeletion(targets: [LargeFile]) async {
+        // A row selected before its folder was excluded must not be trashed, and
+        // a file from iCloud Drive's own folder is never offered for the Trash.
+        let targets = targets.filter { $0.canMoveToTrash && !ExcludedPathsStore.isExcluded($0.path) }
+        guard !targets.isEmpty else { return }
+        guard claimConfirmedCleanOrExplain() else { return }
+
+        // A row can stand for several files (an AI model is a manifest plus its
+        // blobs), so expand to components here. Component order matters: the
+        // manifest goes first, so an interrupted delete leaves orphaned blobs
+        // rather than a model Ollama still lists but can no longer run.
+        var urls: [URL] = []
+        var pathToDisplayName: [String: String] = [:]
+        var pathToExpectedSizeBytes: [String: Int64] = [:]
+        var aiModelPaths = Set<String>()
+        for file in targets {
+            let isAIModel: Bool
+            if case .aiModel? = file.kind { isAIModel = true } else { isAIModel = false }
+            for component in file.componentPaths {
+                urls.append(component)
+                pathToDisplayName[component.path] = file.displayName
+                if isAIModel { aiModelPaths.insert(component.path) }
+            }
+            // Only single-file rows can claim a known size up front; for
+            // multi-part rows each component is measured as it goes so the
+            // total doesn't count the row's bytes once per component.
+            if file.componentPaths.count == 1, let only = file.componentPaths.first {
+                pathToExpectedSizeBytes[only.path] = file.sizeBytes
+            }
+        }
+
+        await runUserSelectedDeletion(
+            urls: urls,
+            pathToDisplayName: pathToDisplayName,
+            pathToExpectedSizeBytes: pathToExpectedSizeBytes,
+            aiModelPaths: aiModelPaths,
+            totalBytes: targets.reduce(Int64(0)) { $0 + $1.sizeBytes },
+            source: .largeFiles,
+            removeRows: { deletedPaths in
+                // A row is gone only when every path it stood for is gone. Matching
+                // on `id` alone would drop a model as soon as its manifest trashed,
+                // even if a multi-gigabyte blob failed and still occupies the disk —
+                // and since blobs are only ever discovered through their manifest, a
+                // later scan could never surface it again. Rows that deleted
+                // partially stay listed and stay selected, so a retry can finish the
+                // job (the already-trashed manifest is skipped as non-existent).
+                removeClearedLargeFileRows(largeFiles.filter { $0.isFullyRemoved(byDeleting: deletedPaths) })
+            },
+            failureMessage: String(localized: "Unable to delete the selected files. Please try again.")
+        )
+    }
+
+    /// The delete Large Files and leftovers share: the user's own picks through
+    /// `deleteUserSelectedFiles`, with the live overlay, the Trash total and a
+    /// History entry. `removeRows` gets the standardized paths that went.
+    /// When the engine throws, `beforeFailureCloses` runs, the overlay closes and
+    /// `failureMessage` shows.
+    private func runUserSelectedDeletion(
+        urls: [URL],
+        pathToDisplayName: [String: String],
+        pathToExpectedSizeBytes: [String: Int64],
+        aiModelPaths: Set<String> = [],
+        privilegedEligiblePaths: Set<String> = [],
+        totalBytes: Int64,
+        source: CleanupSource,
+        removeRows: (Set<String>) -> Void,
+        failureMessage: String,
+        beforeFailureCloses: () -> Void = {}
+    ) async {
+        let progressBuffer = DeletionProgressBuffer()
+        let liveSession = DeletionSession(totalBytes: totalBytes, totalItems: urls.count)
+        manualDeletionSession = liveSession
+        let progressPoller = liveSession.pollProgress(from: progressBuffer)
+
+        isDeleting = true
+        errorMessage = nil
+        defer {
+            isDeleting = false
+            progressPoller.cancel()
+        }
+
+        let engineStart = Date()
+        do {
+            let report = try await fileDeleter.deleteUserSelectedFiles(
+                at: urls,
+                pathToDisplayName: pathToDisplayName,
+                pathToExpectedSizeBytes: pathToExpectedSizeBytes,
+                aiModelPaths: aiModelPaths,
+                privilegedEligiblePaths: privilegedEligiblePaths,
+                onProgress: { @Sendable event in progressBuffer.ingest(event) }
+            )
+            let elapsedSeconds = Date().timeIntervalSince(engineStart)
+            incrementMovedToTrashTotal(by: report.bytesMovedToTrash)
+            lastDeletionReport = report
+            removeRows(Set(report.deletedItems.map {
+                URL(fileURLWithPath: $0.path).standardizedFileURL.path
+            }))
+            progressPoller.cancel()
+            liveSession.completeRun(
+                bytesMovedToTrash: report.bytesMovedToTrash,
+                elapsedSeconds: elapsedSeconds,
+                failedItems: report.userVisibleFailures,
+                movedToTrashCount: report.movedToTrashCount
+            )
+            if !report.ownershipWarningPaths.isEmpty { liveSession.noteTrashOwnershipWarning() }
+            recordCleanup(report, trigger: .manual, source: source)
+        } catch {
+            beforeFailureCloses()
+            manualDeletionSession = nil
+            errorMessage = failureMessage
+        }
+    }
+
+    /// Takes rows whose files are now in the Trash off the tab. While the area is
+    /// settled, `categoryInputsDidChange` brings the saved record in step with the
+    /// rows left. A stopped rescan leaves the area unsettled with its partial rows
+    /// still listed (#180), and the Overview shows the saved record meanwhile, so
+    /// the trashed rows come off that record here or it would keep counting bytes
+    /// that are gone until the next full scan.
+    ///
+    /// Only rows the record counted come off it, at the size it counted them. A row
+    /// the stopped rescan was first to find was never in the record, and taking it
+    /// off would leave the figure too low. When the record is from an earlier launch,
+    /// nothing is known about its rows and it is left alone.
+    func removeClearedLargeFileRows(_ rows: [LargeFile]) {
+        let ids = Set(rows.map(\.id))
+        withAnimation(.easeInOut(duration: 0.2)) {
+            largeFiles.removeAll { ids.contains($0.id) }
+        }
+        largeFileSelection.ids.subtract(ids)
+        // A group of two that just lost a member is no longer a duplicate;
+        // leaving the survivor badged "2 copies" would misdescribe the disk.
+        largeFileDuplicates.removeFiles(ids: ids)
+        let recordedSizes = ids.compactMap { recordedLargeFileSizes.removeValue(forKey: $0) }
+        guard !isSettled(.largeFiles), !recordedSizes.isEmpty, var record = scanRecords[.largeFiles] else { return }
+        record.bytes = max(0, record.bytes - recordedSizes.reduce(0) { $0 + $1.bytes })
+        record.count = max(0, record.count - recordedSizes.count)
+        record.removeLargeFiles(recordedSizes)
+        saveScanRecord(record, for: .largeFiles)
+    }
+
+    // MARK: - Uninstaller (issue #45)
+
+    func scanInstalledAppsIfNeeded() async {
+        refreshPermission()
+        guard hasFullDiskAccess else { return }
+        // A list whose measuring was stopped part way is not finished either.
+        guard !isScanningInstalledApps, !(hasCompletedInstalledAppsScan && hasFinishedMeasuringApps) else { return }
+        await scanInstalledApps()
+    }
+
+    /// Populates the app picker. Names (and any Spotlight size) stream in first
+    /// so the list can paint; bundle `du` and leftover totals follow in place.
+    func scanInstalledApps() async {
+        refreshPermission()
+        guard hasFullDiskAccess else { return }
+        installedAppsScanGeneration += 1
+        let generation = installedAppsScanGeneration
+        isScanningInstalledApps = true
+        hasCompletedInstalledAppsScan = false
+        lastScanListsStarted([.apps])
+        installedApps = []
+        removableTotalsTask?.cancel()
+        removableTotalsTask = nil
+        isMeasuringRemovableTotals = false
+        appFootprintItemsByAppID = [:]
+        removableBytesByAppID = [:]
+        defer {
+            if installedAppsScanGeneration == generation {
+                isScanningInstalledApps = false
+            }
+        }
+
+        var collected: [InstalledApp] = []
+        for await app in uninstallScanner.installedAppsStream() {
+            guard installedAppsScanGeneration == generation, !Task.isCancelled else { return }
+            collected.append(app)
+            // Warm the shared icon cache before the grid/list re-renders this app.
+            _ = BrandIconService.shared.installedAppIcon(at: app.bundleURL)
+            installedApps = collected
+        }
+        // Only a stream that ran to completion counts as a finished scan. A
+        // cancelled or superseded run leaves `hasCompletedInstalledAppsScan`
+        // false so `scanInstalledAppsIfNeeded` will scan again rather than trust a
+        // partial list.
+        guard installedAppsScanGeneration == generation, !Task.isCancelled else { return }
+        installedApps = collected
+        // Remember the drive apps while their bundles are still readable, and
+        // before anything treats the scan as finished, so a drive ejected right
+        // after the scan can't leave an app's files looking unowned.
+        let bundles = collected.map(\.bundleURL)
+        await Task.detached(priority: .utility) { DriveAppMemory.record(bundles: bundles) }.value
+        guard installedAppsScanGeneration == generation, !Task.isCancelled else { return }
+        hasCompletedInstalledAppsScan = true
+        refreshAppFolderPaths()
+        // Every app on the Mac is listed now; saved apps not among them are gone.
+        // The file waits for the totals, which the next lines measure.
+        lastScanListsFinished([.apps], savable: false)
+        // The app list just changed under "Uninstall <app> with Purge".
+        PurgeAppShortcuts.refreshAppList()
+
+        // Bundle sizes and leftover-inclusive totals, measured side by side.
+        // Both write in place so alphabetical order never jumps. Kept as a task
+        // the scan queue can wait on, so the next scan does not start while this
+        // one still walks.
+        isMeasuringRemovableTotals = true
+        removableTotalsTask = Task { [weak self] in
+            guard let self else { return }
+            await self.measureBundlesAndRemovableTotals(generation: generation)
+            guard self.installedAppsScanGeneration == generation else { return }
+            self.isMeasuringRemovableTotals = false
+            self.removableTotalsTask = nil
+            if !Task.isCancelled, self.hasMeasuredAllRemovableTotals {
+                self.stampScanRecords([.apps])
+                self.lastScanListsFinished([.apps])
+            }
+        }
+    }
+
+    /// How many apps' leftovers are found and sized at once. Their `du` runs
+    /// share the process-wide cap with the bundle sizing, so this adds no `du`
+    /// beyond it, and a leftover scan the user starts by picking apps still
+    /// gets its turn.
+    private static let removableTotalsWidth = 4
+
+    /// Replaces Spotlight's first-pass bundle size with a `du` walk, and sums
+    /// each app's bundle plus every leftover matched to it, so the tile shows
+    /// the app's full footprint on disk rather than only the default-checked
+    /// subset.
+    ///
+    /// The two run side by side, so the leftovers are measured while the
+    /// biggest bundle (Xcode's, often) is still being walked. Each bundle is
+    /// walked once, by the bundle pass, and each tile's bundle size settles as
+    /// its chunk comes back; the leftover scans leave the bundle out and take
+    /// its size from that pass. Totals are counted strictly in list order, once
+    /// an app's leftovers and bundle size are both in, so a shared path lands in
+    /// the same tile it would if the apps were done one by one.
+    private func measureBundlesAndRemovableTotals(generation: Int) async {
+        let apps = installedApps
+        guard !apps.isEmpty else { return }
+        let progress = AppTotalsProgress()
+
+        func countReadyApps() {
+            while let leftovers = progress.leftovers[progress.nextToCount] {
+                let app = apps[progress.nextToCount]
+                let bundleKey = app.bundleURL.standardizedFileURL.path
+                // A bundle `du` could not read even on the retry counts as 0, as
+                // it did when the leftover scan's second `du` failed too.
+                guard let bundleBytes = progress.bundleBytes[bundleKey] ?? (progress.bundlesDone ? 0 : nil) else { return }
+                progress.leftovers[progress.nextToCount] = nil
+                progress.nextToCount += 1
+                var total: Int64 = 0
+                var items: [OverviewSizedItem] = []
+                var namedFolders: [URL] = []
+                for item in leftovers {
+                    if item.matchReason == .appName { namedFolders.append(item.path) }
+                    guard progress.countedPaths.insert(item.path.standardizedFileURL.path).inserted else { continue }
+                    let size = item.category == .bundle ? bundleBytes : item.sizeBytes
+                    total += size
+                    items.append(OverviewSizedItem(path: item.path.path, bytes: size))
+                }
+                appFootprintItemsByAppID[app.id] = items
+                removableBytesByAppID[app.id] = total
+                recordLeftoverOwner(app, namedFolders: namedFolders)
+            }
+        }
+
+        let urls = apps.map(\.bundleURL)
+        let (chunkSizes, sizesContinuation) = AsyncStream.makeStream(of: [String: Int64].self)
+        let sizing = Task.detached(priority: .userInitiated) {
+            _ = FolderSizing.directorySizes(at: urls, split: .spread, onChunkSizes: { sizesContinuation.yield($0) })
+            sizesContinuation.finish()
+        }
+
+        await withTaskCancellationHandler {
+            // Listed once for every app's scan, rather than once per app.
+            let rootListings = await uninstallScanner.listLeftoverRoots()
+            await withTaskGroup(of: Void.self) { group in
+                // The bundle pass: each chunk's sizes go on the tiles as they land.
+                group.addTask { @MainActor [weak self] in
+                    for await sizes in chunkSizes {
+                        guard let self, self.installedAppsScanGeneration == generation, !Task.isCancelled else {
+                            sizing.cancel()
+                            return
+                        }
+                        progress.bundleBytes.merge(sizes) { _, new in new }
+                        var updated = self.installedApps
+                        var changed = false
+                        for i in updated.indices {
+                            if let size = sizes[updated[i].bundleURL.standardizedFileURL.path] {
+                                updated[i].bundleSizeBytes = size
+                                changed = true
+                            }
+                        }
+                        if changed { self.installedApps = updated }
+                        countReadyApps()
+                    }
+                    guard !Task.isCancelled else { return }
+                    // A bundle `du` could not size gets one more try, as it did
+                    // when each app's leftover scan sized its bundle again.
+                    let missing = apps.map(\.bundleURL).filter {
+                        progress.bundleBytes[$0.standardizedFileURL.path] == nil
+                    }
+                    if !missing.isEmpty {
+                        let retried = await Task.detached(priority: .userInitiated) {
+                            FolderSizing.directorySizes(at: missing, split: .spread)
+                        }.value
+                        guard let self, self.installedAppsScanGeneration == generation, !Task.isCancelled else { return }
+                        progress.bundleBytes.merge(retried) { _, new in new }
+                        var updated = self.installedApps
+                        for i in updated.indices {
+                            if let size = retried[updated[i].bundleURL.standardizedFileURL.path] {
+                                updated[i].bundleSizeBytes = size
+                            }
+                        }
+                        self.installedApps = updated
+                    }
+                    progress.bundlesDone = true
+                    countReadyApps()
+                }
+                // The leftover scans, a few at a time, each taking the next app.
+                for _ in 0..<min(Self.removableTotalsWidth, apps.count) {
+                    group.addTask { @MainActor [weak self] in
+                        while let self, let index = progress.takeNextApp(count: apps.count) {
+                            // The bundle is sized by the bundle pass above.
+                            let stream = self.uninstallScanner.leftoverStream(
+                                for: apps[index],
+                                knownBundleBytes: 0,
+                                rootListings: rootListings
+                            )
+                            var items: [UninstallItem] = []
+                            for await item in stream { items.append(item) }
+                            guard self.installedAppsScanGeneration == generation, !Task.isCancelled else { return }
+                            progress.leftovers[index] = items
+                            countReadyApps()
+                        }
+                    }
+                }
+            }
+        } onCancel: {
+            sizing.cancel()
+        }
+    }
+
+    /// Remembers which human-named folders this installed app matched, so the
+    /// Leftovers scan can still attribute them once the app is gone (#224). Only
+    /// name matches are worth recording: identifier-named folders attribute
+    /// themselves. The write is a small JSON file, done off the main actor.
+    private func recordLeftoverOwner(_ app: InstalledApp, namedFolders: [URL]) {
+        guard let bundleID = app.bundleID, !bundleID.isEmpty, !namedFolders.isEmpty else { return }
+        let name = app.name
+        Task.detached(priority: .utility) {
+            LeftoverOwnerLedgerStore.shared.record(bundleID: bundleID, displayName: name, folders: namedFolders)
+        }
+    }
+
+    /// Bundle-plus-all-leftovers total for an app once measured, else its bundle
+    /// size. This is the figure the tiles and size sort use.
+    func removableBytes(for app: InstalledApp) -> Int64 {
+        removableBytesByAppID[app.id] ?? app.bundleSizeBytes
+    }
+
+    /// True once every listed app has a measured total, so the size sort can use
+    /// the totals without reshuffling tiles while measurement is still in flight.
+    var hasMeasuredAllRemovableTotals: Bool {
+        let ids = Set(installedApps.map(\.id))
+        guard !ids.isEmpty else { return false }
+        return ids.isSubset(of: removableBytesByAppID.keys)
+    }
+
+    /// Every app found has its full total, or there were none to measure. Stop can
+    /// cut the measuring pass short, and a partial sum would read as the real figure
+    /// on the Overview and overwrite the saved one, so until this holds the apps do
+    /// not count as scanned and opening the tab measures them again.
+    var hasFinishedMeasuringApps: Bool {
+        installedApps.isEmpty || hasMeasuredAllRemovableTotals
+    }
+
+    // MARK: - Orphan leftovers (issue #26)
+
+    func scanOrphanLeftoversIfNeeded() async {
+        refreshPermission()
+        guard hasFullDiskAccess else { return }
+        guard !isScanningOrphans, !hasCompletedOrphanScan else { return }
+        await scanOrphanLeftovers()
+    }
+
+    /// Populates the "Leftovers from removed apps" section. Rows stream in and are
+    /// re-sorted largest-first as their sizes land, the same progressive fill the
+    /// other scans use. Requires Full Disk Access: without it the Library roots
+    /// are unreadable and the scan would wrongly read as empty.
+    func scanOrphanLeftovers() async {
+        refreshPermission()
+        guard hasFullDiskAccess else { return }
+        orphanScanGeneration += 1
+        let generation = orphanScanGeneration
+        isScanningOrphans = true
+        hasCompletedOrphanScan = false
+        lastScanListsStarted([.leftovers])
+        orphanLeftovers = []
+        orphanSelectedIDs = []
+        defer {
+            if orphanScanGeneration == generation {
+                isScanningOrphans = false
+            }
+        }
+
+        var collected: [UninstallItem] = []
+        for await item in orphanScanner.orphanStream() {
+            guard orphanScanGeneration == generation, !Task.isCancelled else { return }
+            collected.append(item)
+            orphanLeftovers = collected.sorted { $0.sizeBytes > $1.sizeBytes }
+        }
+        // Only a stream that ran to completion counts as a finished scan, so a
+        // cancelled or superseded run scans again rather than trusting a partial
+        // list.
+        guard orphanScanGeneration == generation, !Task.isCancelled else { return }
+        orphanLeftovers = collected.sorted { $0.sizeBytes > $1.sizeBytes }
+        hasCompletedOrphanScan = true
+        stampScanRecords([.leftovers])
+        lastScanListsFinished([.leftovers])
+    }
+
+    /// Only a row on the live list can be ticked, never one from the last scan's
+    /// saved file (#283).
+    func toggleOrphanSelected(id: String) {
+        if orphanSelectedIDs.contains(id) {
+            orphanSelectedIDs.remove(id)
+        } else if orphanLeftovers.contains(where: { $0.id == id }) {
+            orphanSelectedIDs.insert(id)
+        }
+    }
+
+    /// Only rows on the live list can be ticked: a leftover from the last scan's
+    /// saved file (#283) must not land ticked when the scan finds it again.
+    func setAllOrphansSelected(_ selected: Bool, ids: [String]) {
+        if selected {
+            let live = Set(orphanLeftovers.map(\.id))
+            orphanSelectedIDs.formUnion(ids.filter(live.contains))
+        } else {
+            orphanSelectedIDs.subtract(ids)
+        }
+    }
+
+    var selectedOrphanBytes: Int64 {
+        orphanLeftovers
+            .filter { orphanSelectedIDs.contains($0.id) }
+            .reduce(Int64(0)) { $0 + $1.sizeBytes }
+    }
+
+    var selectedOrphanCount: Int {
+        orphanLeftovers.filter { orphanSelectedIDs.contains($0.id) }.count
+    }
+
+    /// Opens the orphan review sheet with the ticked leftovers, each carried in
+    /// pre-selected so the sheet's own checkboxes start where the list left off.
+    func requestOrphanCleanup() {
+        let items = orphanLeftovers
+            .filter { orphanSelectedIDs.contains($0.id) }
+            .map { item -> UninstallItem in
+                var copy = item
+                copy.isSelected = true
+                return copy
+            }
+        guard !items.isEmpty, !isDeleting else { return }
+        orphanCleanupPlan = OrphanCleanupPlan(items: items)
+    }
+
+    func cancelOrphanCleanup() {
+        orphanCleanupPlan = nil
+    }
+
+    /// The uninstaller quits a running app before it moves anything. A leftover
+    /// has no app to quit, so before anything moves each row is judged again
+    /// against a fresh view of what is installed and running
+    /// (`OrphanLeftoverScanPolicy.keepsAtConfirm`): an owner that is back, from
+    /// anywhere, or an installed app that now carries the folder's name, keeps
+    /// the row (#224). The rest go ahead, and the alert names what was kept.
+    func confirmOrphanCleanup(_ plan: OrphanCleanupPlan) async {
+        orphanCleanupPlan = nil
+        let selected = plan.selectedItems
+        let owners = Set(selected.flatMap(\.ownerBundleIDs))
+        let (installed, present) = await Task.detached(priority: .userInitiated) {
+            (
+                OrphanLeftoverScanPolicy.makeInstalledAppIndex(),
+                owners.filter { OrphanLeftoverScanPolicy.isOwnerPresent(bundleID: $0) }
+            )
+        }.value
+        let kept = selected.filter { item in
+            OrphanLeftoverScanPolicy.keepsAtConfirm(
+                ownerBundleIDs: item.ownerBundleIDs,
+                folderName: item.path.lastPathComponent,
+                category: item.category,
+                evidence: item.matchReason,
+                installed: installed,
+                presentOwners: present
+            )
+        }
+        let keptIDs = Set(kept.map(\.id))
+        await performLeftoverCleanup(items: selected.filter { !keptIDs.contains($0.id) })
+        // After the clean, which clears the message before it starts, and only
+        // when the clean itself had nothing to say: its own errors come first.
+        if !kept.isEmpty, errorMessage == nil {
+            errorMessage = keptOwnersMessage(kept)
+        }
+    }
+
+    private func keptOwnersMessage(_ kept: [UninstallItem]) -> String {
+        let names = Set(kept.map(\.safetyInfo.headline)).sorted()
+        if names.count == 1, let name = names.first {
+            return String(localized: "\(name) is open or back on this Mac, so its files were kept.")
+        }
+        return String(localized: "These apps are open or back on this Mac, so their files were kept: \(names.joined(separator: ", ")).")
+    }
+
+    // MARK: - Leftovers of apps removed outside Purge (issue #65)
+
+    /// The review for an app that left the Applications folders outside Purge, or
+    /// `nil` when it left nothing worth showing. `survivors` is every app still in
+    /// the app roots, so a leftover one of them also claims is never offered.
+    /// `trashedBundleURL` is the bundle's own copy in the Trash, found by file
+    /// number, never a same-named copy left over from an earlier delete.
+    func removedAppLeftoverPlan(
+        for app: InstalledApp,
+        survivors: [InstalledApp],
+        trashedBundleURL: URL?
+    ) async -> RemovedAppLeftoverPlan? {
+        var scanned: [UninstallItem] = []
+        for await item in uninstallScanner.leftoverStream(for: app) {
+            scanned.append(item)
+        }
+        let appGroupClaims = await AppGroupClaims.gatherOffMain(for: survivors, leftovers: scanned)
+        let items = RemovedAppReviewFiltering.reviewItems(
+            from: scanned,
+            owner: app,
+            survivors: survivors,
+            appGroupClaims: appGroupClaims
+        )
+            .filter { !ExcludedPathsStore.isExcluded($0.path) }
+            .sorted(by: uninstallItemOrder)
+        guard !items.isEmpty else { return nil }
+        return RemovedAppLeftoverPlan(app: app, items: items, trashedBundleURL: trashedBundleURL)
+    }
+
+    func cancelRemovedAppLeftovers() {
+        removedAppLeftoverPlan = nil
+    }
+
+    /// Checks the app is still gone before anything moves: the review opens the
+    /// moment a bundle leaves, and an update or a put-back can land while the sheet
+    /// is up. The check runs before the sheet closes because `RemovedAppMonitor`
+    /// reads a closed sheet with no clean running as the end of the review.
+    func confirmRemovedAppLeftovers(_ plan: RemovedAppLeftoverPlan) async {
+        let checked = await RemovedAppPresence.revalidate(plan)
+        // A second click while the check ran finds the sheet already gone.
+        guard removedAppLeftoverPlan?.id == plan.id else { return }
+        // A clean that started while the sheet was up, or during the check above,
+        // would make `performLeftoverCleanup` refuse this one. Unlike the other
+        // confirmations this review can't be reopened by hand, so it is held for
+        // the monitor to show again instead of dropped (#173).
+        guard !isDeleting else {
+            removedAppReviewHeldForAnotherClean = true
+            removedAppLeftoverPlan = nil
+            errorMessage = String(localized: "Purge is already cleaning. This review will open again when it's done.")
+            return
+        }
+        removedAppLeftoverPlan = nil
+        guard let checked else {
+            errorMessage = String(localized: "\(plan.app.name) is on this Mac again, so its files were kept.")
+            return
+        }
+        await performLeftoverCleanup(items: checked.selectedItems)
+    }
+
+    /// Drops an app that left the app roots outside Purge, so the picker never
+    /// offers to uninstall a bundle that is no longer there.
+    func forgetRemovedApp(at bundleURL: URL) {
+        let key = bundleURL.standardizedFileURL.path
+        guard !FileManager.default.fileExists(atPath: key) else { return }
+        installedApps.removeAll { $0.id == key }
+        selectedAppIDs.remove(key)
+        removableBytesByAppID[key] = nil
+        let spellings: Set<String> = [bundleURL.path, key]
+        removeLastScanRows { spellings.contains($0.path) }
+        forgetInLastScanFile(paths: spellings)
+    }
+
+    /// Trashes leftovers whose app is already gone (orphans, and apps removed
+    /// outside Purge), reusing the uninstaller's deletion primitive: those paths
+    /// sit outside the cache allowlist, and `deleteUserSelectedFiles` accepts them
+    /// through `AppUninstallScanPolicy.isEligibleForUninstallDeletion`, the same
+    /// gate the scanners used to offer them. Shares the live-session overlay,
+    /// progress poller, and history entry with the other manual flows.
+    ///
+    /// Escalation matches the uninstaller's leftover pass: an item whose parent
+    /// folder is not writable may go through the administrator helper. That is the
+    /// same class of app data, and without it a root-owned launch daemon left by a
+    /// removed app could never be cleared. Only items the user ticked reach here,
+    /// and the removed-app review never pre-ticks anything outside the home folder
+    /// (`RemovedAppReviewFiltering`).
+    private func performLeftoverCleanup(items: [UninstallItem]) async {
+        guard !items.isEmpty else { return }
+        guard claimConfirmedCleanOrExplain() else { return }
+
+        var urls: [URL] = []
+        var pathToDisplayName: [String: String] = [:]
+        var pathToExpectedSizeBytes: [String: Int64] = [:]
+        var privilegedEligiblePaths = Set<String>()
+        for item in items {
+            let key = item.path.standardizedFileURL.path
+            urls.append(item.path)
+            pathToDisplayName[key] = item.safetyInfo.headline
+            pathToExpectedSizeBytes[key] = item.sizeBytes
+            // Shared `/Library` roots (launch daemons, shared support) are not
+            // user-writable; everything in the home Library stays unprivileged.
+            if pathNeedsPrivilege(item.path) { privilegedEligiblePaths.insert(key) }
+        }
+
+        leftoverCleanupFailed = false
+        await runUserSelectedDeletion(
+            urls: urls,
+            pathToDisplayName: pathToDisplayName,
+            pathToExpectedSizeBytes: pathToExpectedSizeBytes,
+            privilegedEligiblePaths: privilegedEligiblePaths,
+            totalBytes: items.reduce(Int64(0)) { $0 + $1.sizeBytes },
+            source: .leftovers,
+            removeRows: { deletedPaths in removeTrashedRowsEverywhere(deletedPaths: deletedPaths) },
+            failureMessage: String(localized: "Unable to remove the selected leftovers. Please try again."),
+            // Before the session clears: the monitor reads this as it does.
+            beforeFailureCloses: { leftoverCleanupFailed = true }
+        )
+    }
+
+    // MARK: - Command-line tools (#225)
+
+    func scanCommandLineToolsIfNeeded() async {
+        guard !isScanningCommandLineTools, !hasCompletedCommandLineToolScan else { return }
+        await scanCommandLineTools()
+    }
+
+    func scanCommandLineTools() async {
+        commandLineToolScanGeneration += 1
+        let generation = commandLineToolScanGeneration
+        isScanningCommandLineTools = true
+        hasCompletedCommandLineToolScan = false
+        defer {
+            if commandLineToolScanGeneration == generation { isScanningCommandLineTools = false }
+        }
+        let result = await scanSources.commandLineTools()
+        guard commandLineToolScanGeneration == generation, !Task.isCancelled else { return }
+        commandLineTools = result
+        commandLineToolSelectedIDs.formIntersection(result.standalone.map(\.id) + result.managed.map(\.id))
+        hasCompletedCommandLineToolScan = true
+    }
+
+    func toggleCommandLineToolSelected(id: String) {
+        if commandLineToolSelectedIDs.contains(id) {
+            commandLineToolSelectedIDs.remove(id)
+        } else {
+            commandLineToolSelectedIDs.insert(id)
+        }
+    }
+
+    func setAllCommandLineToolsSelected(_ selected: Bool, ids: [String]) {
+        if selected {
+            commandLineToolSelectedIDs.formUnion(ids)
+        } else {
+            commandLineToolSelectedIDs.subtract(ids)
+        }
+    }
+
+    var selectedCommandLineTools: [StandaloneCommandLineTool] {
+        commandLineTools.standalone.filter { commandLineToolSelectedIDs.contains($0.id) }
+    }
+
+    var selectedPackageManagerTools: [PackageManagerTool] {
+        commandLineTools.managed.filter { commandLineToolSelectedIDs.contains($0.id) }
+    }
+
+    var selectedCommandLineToolCount: Int {
+        selectedCommandLineTools.count + selectedPackageManagerTools.count
+    }
+
+    var selectedCommandLineToolBytes: Int64 {
+        selectedCommandLineTools.reduce(Int64(0)) { $0 + $1.sizeBytes }
+            + selectedPackageManagerTools.reduce(Int64(0)) { $0 + $1.sizeBytes }
+    }
+
+    /// Opens the review sheet with every ticked tool, both kinds.
+    func requestCommandLineToolRemoval() {
+        let tools = selectedCommandLineTools
+        let managed = selectedPackageManagerTools
+        guard !tools.isEmpty || !managed.isEmpty else { return }
+        commandLineToolRemovalPlan = CommandLineToolRemovalPlan(tools: tools, managed: managed)
+    }
+
+    /// Closes the sheet, except while the removal runs.
+    func closeCommandLineToolRemoval() {
+        switch commandLineToolRemovalPlan?.phase {
+        case .checking?, .working?:
+            return
+        case .review?, .finished?, nil:
+            commandLineToolRemovalPlan = nil
+        }
+    }
+
+    /// Removes every ticked tool in one pass the sheet follows row by row.
+    ///
+    /// Script installs first: Purge stops the background jobs paired with each
+    /// folder, refuses while any process still uses one, and only then moves
+    /// the folders, shims and job plists to the Trash through
+    /// `CommandLineToolScanPolicy`'s gate. A refusal stops everything before
+    /// anything runs. Then each package manager removes its own tools, one at a
+    /// time; Purge deletes none of those files itself. The batch is one History
+    /// entry.
+    func confirmCommandLineToolRemoval() async {
+        guard var plan = commandLineToolRemovalPlan, plan.phase == .review else { return }
+        guard claimConfirmedCleanOrExplain() else { return }
+        // Claimed now, not after the in-use check: that check can take seconds,
+        // and another clean must not start meanwhile.
+        isDeleting = true
+        errorMessage = nil
+        defer { isDeleting = false }
+        let planID = plan.id
+        func publish() {
+            if commandLineToolRemovalPlan?.id == planID { commandLineToolRemovalPlan = plan }
+        }
+
+        plan.phase = .checking
+        plan.refusal = nil
+        publish()
+        if !plan.tools.isEmpty {
+            let listedPlists = Set(plan.launchAgents.map(\.plist.standardizedFileURL.path))
+            let folders = plan.tools.map(\.folder)
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            let refusal = await Task.detached(priority: .userInitiated) {
+                // Labels come from the plists as they are now, and only for the
+                // jobs the sheet listed.
+                let jobs = folders
+                    .flatMap { CommandLineToolScanPolicy.launchAgents(startingFrom: $0, home: home) }
+                    .filter { listedPlists.contains($0.plist.standardizedFileURL.path) }
+                return Self.commandLineToolRemovalRefusal(jobs: jobs, folders: folders)
+            }.value
+            if let refusal {
+                plan.phase = .review
+                plan.refusal = refusal
+                publish()
+                return
+            }
+        }
+
+        plan.phase = .working
+        publish()
+
+        let volumeURL = FileManager.default.homeDirectoryForCurrentUser
+        let capacityBefore = await Task.detached { VolumeCapacityReader.read(for: volumeURL) }.value
+        var deletedItems: [DeletedItem] = []
+        var failedItems: [FailedDeletionItem] = []
+        var skippedItems: [SkippedDeletionItem] = []
+        var bytesMovedToTrash: Int64 = 0
+        var bytesRemovedDirectly: Int64 = 0
+
+        if !plan.tools.isEmpty {
+            for tool in plan.tools { plan.states[tool.id] = .running }
+            publish()
+            var urls: [URL] = []
+            var pathToDisplayName: [String: String] = [:]
+            var pathToExpectedSizeBytes: [String: Int64] = [:]
+            for tool in plan.tools {
+                for url in tool.install.removalPaths {
+                    urls.append(url)
+                    pathToDisplayName[url.standardizedFileURL.path] = tool.name
+                }
+                pathToExpectedSizeBytes[tool.folder.standardizedFileURL.path] = tool.sizeBytes
+            }
+            do {
+                let report = try await fileDeleter.deleteUserSelectedFiles(
+                    at: urls,
+                    pathToDisplayName: pathToDisplayName,
+                    pathToExpectedSizeBytes: pathToExpectedSizeBytes
+                )
+                deletedItems += report.deletedItems
+                failedItems += report.failedItems
+                skippedItems += report.skippedItems
+                bytesMovedToTrash += report.bytesMovedToTrash
+                incrementMovedToTrashTotal(by: report.bytesMovedToTrash)
+                let moved = Set(report.deletedItems.map { URL(fileURLWithPath: $0.path).standardizedFileURL.path })
+                for tool in plan.tools {
+                    plan.states[tool.id] = moved.contains(tool.folder.standardizedFileURL.path)
+                        ? .movedToTrash
+                        : .failed(String(localized: "Purge couldn't move this folder to the Trash."))
+                }
+            } catch {
+                for tool in plan.tools {
+                    plan.states[tool.id] = .failed(String(localized: "Purge couldn't move this folder to the Trash."))
+                }
+            }
+            publish()
+        }
+
+        for tool in plan.managed {
+            guard tool.canRun else {
+                plan.states[tool.id] = .managerMissing
+                publish()
+                continue
+            }
+            plan.states[tool.id] = .running
+            publish()
+            switch await packageManagerUninstall(tool) {
+            case .removed:
+                plan.states[tool.id] = .removedByManager
+                bytesRemovedDirectly += tool.sizeBytes
+                deletedItems.append(DeletedItem(
+                    path: tool.locations.first?.path ?? tool.name,
+                    sizeBytes: tool.sizeBytes,
+                    displayName: tool.name,
+                    movedToTrash: false
+                ))
+            case .failed(let message):
+                plan.states[tool.id] = .failed(message)
+            case .stillPresent:
+                plan.states[tool.id] = .failed(String(localized: "\(tool.manager.displayName) finished, but \(tool.name) is still there."))
+            case .managerMissing:
+                plan.states[tool.id] = .managerMissing
+            case .gone:
+                plan.states[tool.id] = .removedByManager
+            }
+            publish()
+        }
+
+        let capacityAfter = await Task.detached { VolumeCapacityReader.read(for: volumeURL) }.value
+        let report = DeletionReport(
+            bytesMovedToTrash: bytesMovedToTrash,
+            bytesRemovedDirectly: bytesRemovedDirectly,
+            deletedItems: deletedItems,
+            failedItems: failedItems,
+            skippedItems: skippedItems,
+            capacityBefore: capacityBefore,
+            capacityAfter: capacityAfter,
+            timestamp: Date()
+        )
+        if !deletedItems.isEmpty {
+            lastDeletionReport = report
+            recordCleanup(report, trigger: .manual, source: .commandLineTools)
+        }
+
+        let cleared = Set(plan.states.compactMap { id, state -> String? in
+            switch state {
+            case .movedToTrash, .removedByManager: return id
+            case .waiting, .running, .failed, .managerMissing: return nil
+            }
+        })
+        withAnimation(.easeInOut(duration: 0.2)) {
+            commandLineTools.standalone.removeAll { cleared.contains($0.id) }
+            commandLineTools.managed.removeAll { cleared.contains($0.id) }
+        }
+        commandLineToolSelectedIDs.subtract(cleared)
+        plan.phase = .finished
+        publish()
+    }
+
+    /// Why the folders can't go yet, or nil. A process can take a moment to
+    /// exit after its job stops, so a busy answer is asked again for up to two
+    /// seconds before it counts. On any refusal, every job this stopped is
+    /// started again, so nothing is left down for a removal that never ran.
+    nonisolated private static func commandLineToolRemovalRefusal(
+        jobs: [LaunchAgentJob],
+        folders: [URL]
+    ) -> String? {
+        var stopped: [LaunchAgentJob] = []
+        for job in jobs {
+            switch LaunchAgentStopper.stop(label: job.label) {
+            case .stopped:
+                stopped.append(job)
+            case .notLoaded:
+                continue
+            case .failed(let message):
+                return restartingJobs(
+                    stopped,
+                    after: String(localized: "Purge couldn't stop the background job \(job.label): \(message)")
+                )
+            }
+        }
+        var result = OpenFileCheck.check(folders: folders)
+        for _ in 0..<(stopped.isEmpty ? 0 : 8) {
+            guard case .inUse = result else { break }
+            Thread.sleep(forTimeInterval: 0.25)
+            result = OpenFileCheck.check(folders: folders)
+        }
+        switch result {
+        case .free:
+            return nil
+        case .inUse(let holders):
+            let names = holders.prefix(3).map { "\($0.command) (\($0.pid))" }
+            let list = ListFormatter.localizedString(byJoining: names)
+            let message = holders.count == 1
+                ? String(localized: "Quit \(list) first. It is using files Purge is about to remove.")
+                : String(localized: "Quit \(list) first. They are using files Purge is about to remove.")
+            return restartingJobs(stopped, after: message)
+        case .unavailable:
+            return restartingJobs(
+                stopped,
+                after: String(localized: "Purge couldn't check whether these tools are in use, so it left them alone. Try again in a moment.")
+            )
+        }
+    }
+
+    /// Starts the stopped jobs again and says so after `message`.
+    nonisolated private static func restartingJobs(_ jobs: [LaunchAgentJob], after message: String) -> String {
+        guard !jobs.isEmpty else { return message }
+        let notStarted = jobs.filter { !LaunchAgentStopper.start(plist: $0.plist) }.map(\.label)
+        if notStarted.isEmpty {
+            return message + " " + String(localized: "Purge started the background jobs it had stopped again.")
+        }
+        let labels = ListFormatter.localizedString(byJoining: notStarted)
+        let note = notStarted.count == 1
+            ? String(localized: "Purge couldn't start \(labels) again. It starts again when you next log in.")
+            : String(localized: "Purge couldn't start \(labels) again. They start again when you next log in.")
+        return message + " " + note
+    }
+
+    // MARK: App selection
+
+    /// Only a listed app can be ticked, never one from the last scan's saved file
+    /// (#283). Uninstall an App sets `selectedAppIDs` itself, before the list loads.
+    func toggleAppSelected(id: String) {
+        if selectedAppIDs.contains(id) {
+            selectedAppIDs.remove(id)
+        } else if installedApps.contains(where: { $0.id == id }) {
+            selectedAppIDs.insert(id)
+        }
+    }
+
+    /// Ticks or clears every app of a group at once (#155). Like the single
+    /// toggle, it ticks only listed apps, never a saved one from the last scan.
+    func setAppsSelected(_ ids: [String], _ isSelected: Bool) {
+        if isSelected {
+            let listed = Set(installedApps.map(\.id))
+            selectedAppIDs.formUnion(ids.filter(listed.contains))
+        } else {
+            selectedAppIDs.subtract(ids)
+        }
+    }
+
+    var selectedApps: [InstalledApp] {
+        installedApps.filter { selectedAppIDs.contains($0.id) }
+    }
+
+    /// Total shown on the Uninstall button: bundle plus all matched leftovers per
+    /// app where measured, bundle size otherwise. The review sheet then shows the
+    /// exact, item-by-item figure for what stays ticked.
+    var selectedAppsRemovableBytes: Int64 {
+        selectedApps.reduce(Int64(0)) { $0 + removableBytes(for: $1) }
+    }
+
+    // MARK: Building the removal plan
+
+    /// Gathers the bundle plus leftovers for every selected app and opens the
+    /// review sheet. Every match arrives checked; the sharing pass below then
+    /// unticks any leftover a kept app still claims, so the sheet shows upfront
+    /// what the deletion pass would otherwise silently hold back.
+    func requestUninstallSelectedApps() async {
+        let apps = selectedApps
+        guard !apps.isEmpty, !isBuildingUninstallPlan, !isDeleting else { return }
+        isBuildingUninstallPlan = true
+        defer { isBuildingUninstallPlan = false }
+
+        var appPlans: [UninstallAppPlan] = []
+        for app in apps {
+            if Task.isCancelled { return }
+            var items: [UninstallItem] = []
+            for await item in uninstallScanner.leftoverStream(for: app) {
+                items.append(item)
+            }
+            items.sort(by: uninstallItemOrder)
+            appPlans.append(UninstallAppPlan(app: app, items: items))
+        }
+
+        let removingIDs = Set(appPlans.map(\.app.id))
+        let survivors = installedApps.filter { !removingIDs.contains($0.id) }
+        let appGroupClaims = await AppGroupClaims.gatherOffMain(
+            for: survivors,
+            leftovers: appPlans.flatMap(\.items)
+        )
+        let claimants = await survivorsWithProtectedApps(survivors, removing: removingIDs)
+        if Task.isCancelled { return }
+        Self.markSharedWithSurvivors(in: &appPlans, survivors: claimants, appGroupClaims: appGroupClaims)
+
+        let id = appPlans.map(\.app.id).sorted().joined(separator: "|")
+        let suites = suiteContext(for: removingIDs)
+        uninstallPlan = UninstallPlan(id: id, apps: appPlans, suiteGroups: suites.groups, suiteApps: suites.apps)
+    }
+
+    /// Unticks and labels any leftover that an app the user is keeping also claims,
+    /// so removing one app never proposes trashing a file a surviving app reads
+    /// (the two-copies case, or one app of a suite that shares support). The bundle
+    /// is never shared, and this reuses the deletion pass's `appStillUsing` matcher
+    /// so the sheet and the actual removal agree on what is held back.
+    /// `survivors` are the installed apps not being removed, and `appGroupClaims`
+    /// the app groups they list in their entitlements.
+    nonisolated static func markSharedWithSurvivors(
+        in appPlans: inout [UninstallAppPlan],
+        survivors: [InstalledApp],
+        appGroupClaims: AppGroupClaims
+    ) {
+        guard !survivors.isEmpty else { return }
+
+        for planIndex in appPlans.indices {
+            let owner = appPlans[planIndex].app
+            for itemIndex in appPlans[planIndex].items.indices {
+                let item = appPlans[planIndex].items[itemIndex]
+                guard item.category != .bundle else { continue }
+                if let survivor = appStillUsing(
+                    leftover: item,
+                    excludingOwner: owner,
+                    among: survivors,
+                    appGroupClaims: appGroupClaims
+                ) {
+                    appPlans[planIndex].items[itemIndex].isSelected = false
+                    appPlans[planIndex].items[itemIndex].keptForApp = survivor.name
+                }
+            }
+        }
+    }
+
+    func dismissUninstallPlan() {
+        uninstallPlan = nil
+    }
+
+    /// Bundle first, then by category, then largest within a category.
+    private func uninstallItemOrder(_ lhs: UninstallItem, _ rhs: UninstallItem) -> Bool {
+        if lhs.category.sortOrder != rhs.category.sortOrder {
+            return lhs.category.sortOrder < rhs.category.sortOrder
+        }
+        return lhs.sizeBytes > rhs.sizeBytes
+    }
+
+    /// Confirms the reviewed plan (the sheet passes back its edited copy) and
+    /// trashes every checked item across every app.
+    func confirmUninstallPlan(_ plan: UninstallPlan) async {
+        uninstallPlan = nil
+        await performUninstallPlan(plan)
+    }
+
+    /// An app whose bundle needs the helper, held whole (bundle + leftovers) until
+    /// the helper is enabled. We never strip an app's leftovers while its bundle
+    /// stays put: that would gut an app the user can still open.
+    private struct PendingLockedUninstall {
+        let app: InstalledApp
+        let items: [UninstallItem]
+        var bundlePath: String { app.bundleURL.standardizedFileURL.path }
+    }
+
+    private var pendingLockedUninstalls: [PendingLockedUninstall] = []
+
+    /// Moving an item requires write access to the directory containing it. The
+    /// item's own owner and mode do not matter for a rename, so checking the item
+    /// itself would unnecessarily elevate files in a user-writable folder.
+    private func pathNeedsPrivilege(_ url: URL) -> Bool {
+        !FileManager.default.isWritableFile(atPath: url.deletingLastPathComponent().path)
+    }
+
+    /// `survivors` plus the apps the uninstaller never lists, Apple's among them
+    /// (#176), and apps on drives that are unplugged (#99), so they hold back
+    /// leftovers that are theirs too. They claim by bundle id and name only:
+    /// their app groups are not read, which would mean reading the signatures
+    /// of some 60 system bundles on every review. `removing` holds the bundle
+    /// paths of the apps going now.
+    private func survivorsWithProtectedApps(
+        _ survivors: [InstalledApp],
+        removing: Set<String>
+    ) async -> [InstalledApp] {
+        let (protected, remembered) = await Task.detached(priority: .userInitiated) {
+            (AppUninstallScanner.protectedApps(), DriveAppMemory.apps())
+        }.value
+        return survivors + protected
+            + Self.unlistedDriveApps(besides: survivors, removing: removing, remembered: remembered)
+    }
+
+    /// Remembered apps on drives the list doesn't hold now, most often because
+    /// the drive is unplugged (#99). They claim their leftovers like any app
+    /// the user keeps. An app being removed never counts.
+    nonisolated static func unlistedDriveApps(
+        besides listed: [InstalledApp],
+        removing: Set<String>,
+        remembered: [InstalledApp] = DriveAppMemory.apps()
+    ) -> [InstalledApp] {
+        let listedIDs = Set(listed.map(\.id))
+        return remembered.filter { !listedIDs.contains($0.id) && !removing.contains($0.id) }
+    }
+
+    /// The other still-installed app, if any, that a leftover also belongs to.
+    /// Removing the chosen app must not take a file a second installed app still
+    /// needs, which is what happens when two copies share bundle-id-keyed support.
+    /// Matching reuses the scanner's strict identifier/name rules, plus the app
+    /// groups the remaining apps list in their entitlements, so only a genuinely
+    /// shared leftover is ever held back.
+    private nonisolated static func appStillUsing(
+        leftover item: UninstallItem,
+        excludingOwner owner: InstalledApp,
+        among remaining: [InstalledApp],
+        appGroupClaims: AppGroupClaims
+    ) -> InstalledApp? {
+        AppUninstallScanPolicy.claimant(
+            forLeftoverName: item.path.lastPathComponent,
+            category: item.category,
+            ownerID: owner.id,
+            among: remaining,
+            appGroupClaims: appGroupClaims
+        )
+    }
+
+    /// Builds the "kept, still used by another app" notice shown for a shared leftover
+    /// that Purge deliberately left in place.
+    private func keptSharedFailure(item: UninstallItem, otherApp: InstalledApp) -> CleanFailureItem {
+        CleanFailureItem(
+            path: item.path.path,
+            displayName: "\(otherApp.name) \(item.category.displayName)",
+            reason: .keptForOtherApp,
+            sizeBytes: item.sizeBytes
+        )
+    }
+
+    /// Why Homebrew did not remove a cask app (#254), for the completion note.
+    private enum HomebrewFallbackReason {
+        /// The Caskroom no longer links the cask to this bundle.
+        case notListed
+        /// Homebrew exited with an error and the app is still there.
+        case refused(String)
+        /// Homebrew exited cleanly but the app is still there.
+        case stillPresent
+        /// No `brew` program for this prefix.
+        case managerMissing
+    }
+
+    /// The note for an app Homebrew did not remove. It only claims the Trash
+    /// when the Trash route really moved the bundle; otherwise the app is still
+    /// on this Mac and its "needs your OK" row says what to do next.
+    private static func homebrewFallbackNote(name: String, reason: HomebrewFallbackReason, movedToTrash: Bool) -> String {
+        switch (reason, movedToTrash) {
+        case (.notListed, true):
+            return String(localized: "Homebrew no longer lists \(name), so Purge moved it to the Trash instead.")
+        case (.notListed, false):
+            return String(localized: "Homebrew no longer lists \(name).")
+        case (.refused(let message), true):
+            return String(localized: "Homebrew couldn't remove \(name), so Purge moved it to the Trash instead. Homebrew said: \(message)")
+        case (.refused(let message), false):
+            return String(localized: "Homebrew couldn't remove \(name). Homebrew said: \(message)")
+        case (.stillPresent, true):
+            return String(localized: "Homebrew finished but \(name) was still there, so Purge moved it to the Trash instead.")
+        case (.stillPresent, false):
+            return String(localized: "Homebrew finished but \(name) was still there.")
+        case (.managerMissing, true):
+            return String(localized: "Purge couldn't find Homebrew, so it moved \(name) to the Trash instead.")
+        case (.managerMissing, false):
+            return String(localized: "Purge couldn't find Homebrew to remove \(name).")
+        }
+    }
+
+    /// Trashes the checked items across all apps in `plan`, reusing the same
+    /// live-session overlay, progress poller, and history entry as the other
+    /// manual flows. Kept separate from `performLargeFileDeletion`: they share
+    /// structure but differ in what a row is and what happens after (apps leaving
+    /// the picker), and the large-files path is on the shipping critical path.
+    private func performUninstallPlan(_ plan: UninstallPlan) async {
+        let selectedByApp = plan.apps.map { ($0.app, $0.selectedItems) }.filter { !$0.1.isEmpty }
+        guard !selectedByApp.isEmpty else { return }
+        guard claimConfirmedCleanOrExplain() else { return }
+        // The apps Homebrew removes (#254), by app id. Only a cask app with the
+        // sheet's toggle on and its bundle ticked is here.
+        let homebrewCasks = Dictionary(uniqueKeysWithValues: plan.apps.compactMap { appPlan in
+            appPlan.homebrewCask.map { (appPlan.app.id, $0) }
+        })
+
+        // Claim the deleting flag before the first suspension point below (the
+        // quit wait). On the main actor an `await` is a chance for a second tap to
+        // re-enter, and setting the flag only just before the engine call would
+        // let two runs slip past the guard. The outer defer clears it on every
+        // exit, including the early "nothing quit" return.
+        isDeleting = true
+        defer { isDeleting = false }
+
+        // Quit any running app whose bundle is about to move. If one refuses to
+        // quit — the user cancelled its save prompt, say — it is left installed
+        // rather than trashed out from under a live process. Leftovers-only
+        // selections don't need a quit: they are not the running binary.
+        var toDelete: [(InstalledApp, [UninstallItem])] = []
+        var stillOpen: [InstalledApp] = []
+        for (app, items) in selectedByApp {
+            let removesBundle = items.contains { $0.category == .bundle }
+            if removesBundle {
+                let quit = await quitRunningApp(app)
+                if !quit { stillOpen.append(app); continue }
+            }
+            toDelete.append((app, items))
+        }
+
+        // Everything the user picked belongs to an app that would not quit.
+        guard !toDelete.isEmpty else {
+            manualDeletionSession = nil
+            errorMessage = stillOpenMessage(stillOpen)
+            return
+        }
+
+        // The invariant: an app's leftovers are never trashed while its bundle stays
+        // put. Removing caches and containers now, while the .app itself can't move,
+        // would gut an app the user can still open. So bundles go first, and only the
+        // leftovers of apps whose bundle actually moved are trashed. An app whose
+        // bundle can't be removed (helper not enabled, or a managed bundle the helper
+        // still can't move) is held whole — bundle plus leftovers — as one pending
+        // "needs your OK" unit, and nothing of it is touched.
+        //
+        // A selection where the user unticked the bundle and kept only leftovers is a
+        // deliberate leftovers-only cleanup and removes right away.
+        var bundleRemovingApps: [(app: InstalledApp, bundle: UninstallItem, leftovers: [UninstallItem])] = []
+        var leftoverOnlyApps: [(InstalledApp, [UninstallItem])] = []
+        for (app, items) in toDelete {
+            if let bundle = items.first(where: { $0.category == .bundle }) {
+                bundleRemovingApps.append((app, bundle, items.filter { $0.category != .bundle }))
+            } else {
+                leftoverOnlyApps.append((app, items))
+            }
+        }
+
+        let progressBuffer = DeletionProgressBuffer()
+        // Size and count each distinct path once. Two apps can resolve to the same
+        // bundle-id-keyed leftover, and the delete pass trashes such a path a single
+        // time (see the dedup in pass 2), so counting it twice here would leave the
+        // progress total short of what is actually moved.
+        var countedPaths = Set<String>()
+        var totalBytes: Int64 = 0
+        var totalItems = 0
+        for (_, items) in toDelete {
+            for item in items where countedPaths.insert(item.path.standardizedFileURL.path).inserted {
+                totalBytes += item.sizeBytes
+                totalItems += 1
+            }
+        }
+        let liveSession = DeletionSession(totalBytes: totalBytes, totalItems: totalItems)
+        manualDeletionSession = liveSession
+        let progressPoller = liveSession.pollProgress(from: progressBuffer)
+
+        errorMessage = nil
+        // `isDeleting` is already set and cleared by the outer defer above; here we
+        // only need the poller torn down on exit.
+        defer { progressPoller.cancel() }
+
+        let engineStart = Date()
+
+        // Pass 0 — cask apps Homebrew removes (#254). Homebrew's own uninstall
+        // quits the app, runs the vendor's uninstall steps and deletes the bundle
+        // permanently; Purge deletes no file here. The gate re-reads the Caskroom
+        // link now, so a cask that no longer points at this bundle falls back to
+        // the Trash route below, as does any run Homebrew refuses. The watcher is
+        // told first, because Homebrew removes the bundle in place and the
+        // deleted-apps review would otherwise open on Purge's own removal.
+        var homebrewDeleted: [DeletedItem] = []
+        var homebrewBytes: Int64 = 0
+        var homebrewNotes: [String] = []
+        // Apps Homebrew did not remove, with why. Their note is written after
+        // Pass 1, once it is known whether the Trash route took them.
+        var homebrewFallbacks: [(name: String, bundlePath: String, reason: HomebrewFallbackReason)] = []
+        var homebrewGonePaths = Set<String>()
+        var trashBundleApps = bundleRemovingApps.filter { homebrewCasks[$0.app.id] == nil }
+        // One read of the Caskrooms for the whole run, off the main actor: the
+        // gate below compares against it, and the progress overlay keeps moving.
+        let caskPrefixes = homebrewPrefixes
+        let ownedCasks: [String: HomebrewCask] = homebrewCasks.isEmpty
+            ? [:]
+            : await Task.detached { HomebrewCaskCatalog.installedCasks(prefixes: caskPrefixes) }.value
+        for entry in bundleRemovingApps {
+            guard let cask = homebrewCasks[entry.app.id] else { continue }
+            let bundlePath = entry.bundle.path.standardizedFileURL.path
+            guard ownedCasks[bundlePath] == cask else {
+                homebrewFallbacks.append((entry.app.name, bundlePath, .notListed))
+                trashBundleApps.append(entry)
+                continue
+            }
+            RemovedAppMonitor.shared.noteRemovalByPurge(of: [entry.bundle.path])
+            progressBuffer.ingest(.itemStarted(name: entry.app.name))
+            let tool = HomebrewCaskCatalog.uninstallTool(for: cask, bundleURL: entry.bundle.path)
+            let outcome = await packageManagerUninstall(tool)
+            let bundleIsGone = !FileManager.default.fileExists(atPath: bundlePath)
+            func recordRemoved() {
+                homebrewDeleted.append(DeletedItem(
+                    path: bundlePath,
+                    sizeBytes: entry.bundle.sizeBytes,
+                    displayName: entry.app.name,
+                    movedToTrash: false
+                ))
+                homebrewBytes += entry.bundle.sizeBytes
+                homebrewGonePaths.insert(bundlePath)
+                progressBuffer.ingest(.itemDeleted(sizeBytes: entry.bundle.sizeBytes))
+            }
+            switch outcome {
+            case .removed:
+                recordRemoved()
+                await homebrewCleanup(cask)
+            case .gone:
+                // Nothing to remove and nothing run: the app left between the sheet
+                // and now. Its leftovers can still go, and the total stays whole.
+                homebrewGonePaths.insert(bundlePath)
+                progressBuffer.ingest(.itemDeleted(sizeBytes: entry.bundle.sizeBytes))
+            case .failed(let message):
+                if bundleIsGone {
+                    recordRemoved()
+                    await homebrewCleanup(cask)
+                    homebrewNotes.append(String(localized: "Homebrew removed \(entry.app.name) but reported a problem: \(message)"))
+                } else {
+                    homebrewFallbacks.append((entry.app.name, bundlePath, .refused(message)))
+                    trashBundleApps.append(entry)
+                }
+            case .stillPresent:
+                homebrewFallbacks.append((entry.app.name, bundlePath, .stillPresent))
+                trashBundleApps.append(entry)
+            case .managerMissing:
+                homebrewFallbacks.append((entry.app.name, bundlePath, .managerMissing))
+                trashBundleApps.append(entry)
+            }
+        }
+
+        // Pass 1 — bundles first. A validated .app the user picked is always eligible
+        // for the administrator helper: a managed bundle needs authorization to move
+        // even when its parent directory (/Applications) is writable, so parent-dir
+        // writability is the wrong test for the bundle itself. It goes to the helper
+        // after any permission error, with or without Full Disk Access (#299).
+        var bundleReport: DeletionReport?
+        var movedBundlePaths = homebrewGonePaths
+        if !trashBundleApps.isEmpty {
+            var urls: [URL] = []
+            var names: [String: String] = [:]
+            var sizes: [String: Int64] = [:]
+            var eligible = Set<String>()
+            for entry in trashBundleApps {
+                let key = entry.bundle.path.standardizedFileURL.path
+                urls.append(entry.bundle.path)
+                names[key] = entry.app.name
+                sizes[key] = entry.bundle.sizeBytes
+                eligible.insert(key)
+            }
+            RemovedAppMonitor.shared.noteRemovalByPurge(of: urls)
+            do {
+                let report = try await fileDeleter.deleteUserSelectedFiles(
+                    at: urls,
+                    pathToDisplayName: names,
+                    pathToExpectedSizeBytes: sizes,
+                    privilegedEligiblePaths: eligible,
+                    privilegedBundlePaths: eligible,
+                    onProgress: { @Sendable event in progressBuffer.ingest(event) }
+                )
+                bundleReport = report
+                movedBundlePaths.formUnion(report.deletedItems.map {
+                    URL(fileURLWithPath: $0.path).standardizedFileURL.path
+                })
+            } catch {
+                manualDeletionSession = nil
+                let names = trashBundleApps.map(\.app.name)
+                let label = names.count == 1 ? names[0] : String(localized: "the selected apps")
+                errorMessage = String(localized: "Unable to remove \(label). Please try again.")
+                return
+            }
+        }
+
+        // Now the Trash route has run, each Homebrew fallback can say what really
+        // happened: moved to the Trash, or still on this Mac with its own row.
+        for fallback in homebrewFallbacks {
+            homebrewNotes.append(Self.homebrewFallbackNote(
+                name: fallback.name,
+                reason: fallback.reason,
+                movedToTrash: movedBundlePaths.contains(fallback.bundlePath)
+            ))
+        }
+
+        // Partition by whether the bundle actually left. A held app keeps every one
+        // of its leftovers, deferred with the bundle. Leftovers of apps whose bundle
+        // moved (and leftovers-only selections) go on to pass 2.
+        var heldApps: [(InstalledApp, [UninstallItem])] = []
+        var leftoverBatch: [(InstalledApp, [UninstallItem])] = leftoverOnlyApps
+        for entry in bundleRemovingApps {
+            if movedBundlePaths.contains(entry.bundle.path.standardizedFileURL.path) {
+                if !entry.leftovers.isEmpty { leftoverBatch.append((entry.app, entry.leftovers)) }
+            } else {
+                heldApps.append((entry.app, [entry.bundle] + entry.leftovers))
+            }
+        }
+
+        for (app, items) in heldApps {
+            let key = app.bundleURL.standardizedFileURL.path
+            pendingLockedUninstalls.removeAll { $0.bundlePath == key }
+            pendingLockedUninstalls.append(PendingLockedUninstall(app: app, items: items))
+        }
+
+        // Pass 2 — leftovers, now that their apps are gone. A leftover escalates to
+        // the helper only when its own parent directory is not writable, so ordinary
+        // user-owned files never run as root.
+        // Apps whose bundle did not move are still on this Mac, so a leftover one of
+        // them also claims must be held back rather than swept away with the app being
+        // removed. This is the two-copies case: removing one copy must not strip the
+        // support files the surviving copy still reads.
+        let remainingApps = installedApps.filter {
+            !movedBundlePaths.contains($0.bundleURL.standardizedFileURL.path)
+        }
+        var keptSharedFailures: [CleanFailureItem] = []
+
+        var leftoverReport: DeletionReport?
+        if !leftoverBatch.isEmpty {
+            let appGroupClaims = await AppGroupClaims.gatherOffMain(
+                for: remainingApps,
+                leftovers: leftoverBatch.flatMap { $0.1 }
+            )
+            let claimants = await survivorsWithProtectedApps(remainingApps, removing: movedBundlePaths)
+            var urls: [URL] = []
+            var names: [String: String] = [:]
+            var sizes: [String: Int64] = [:]
+            var eligible = Set<String>()
+            var seen = Set<String>()
+            for (app, items) in leftoverBatch {
+                for item in items {
+                    // Two apps sharing a bundle id resolve to the same bundle-id-keyed
+                    // leftover, so a path can appear under both. Trash and size it once.
+                    let key = item.path.standardizedFileURL.path
+                    guard seen.insert(key).inserted else { continue }
+                    if let otherApp = Self.appStillUsing(
+                        leftover: item,
+                        excludingOwner: app,
+                        among: claimants,
+                        appGroupClaims: appGroupClaims
+                    ) {
+                        keptSharedFailures.append(keptSharedFailure(item: item, otherApp: otherApp))
+                        continue
+                    }
+                    urls.append(item.path)
+                    names[key] = app.name
+                    sizes[key] = item.sizeBytes
+                    if pathNeedsPrivilege(item.path) { eligible.insert(key) }
+                }
+            }
+            // Bundles already moved; a leftover failure here must not discard that.
+            leftoverReport = try? await fileDeleter.deleteUserSelectedFiles(
+                at: urls,
+                pathToDisplayName: names,
+                pathToExpectedSizeBytes: sizes,
+                privilegedEligiblePaths: eligible,
+                onProgress: { @Sendable event in progressBuffer.ingest(event) }
+            )
+        }
+
+        let elapsedSeconds = Date().timeIntervalSince(engineStart)
+
+        // A stuck bundle is always a held app, so its failure is represented by the
+        // synthesized "needs your OK" row below — never also as a bundle failure here.
+        let movedBytes = (bundleReport?.bytesMovedToTrash ?? 0) + (leftoverReport?.bytesMovedToTrash ?? 0)
+        let report = DeletionReport(
+            bytesMovedToTrash: movedBytes,
+            bytesRemovedDirectly: homebrewBytes,
+            deletedItems: homebrewDeleted + (bundleReport?.deletedItems ?? []) + (leftoverReport?.deletedItems ?? []),
+            failedItems: leftoverReport?.failedItems ?? [],
+            skippedItems: leftoverReport?.skippedItems ?? [],
+            capacityBefore: bundleReport?.capacityBefore ?? leftoverReport?.capacityBefore,
+            capacityAfter: leftoverReport?.capacityAfter ?? bundleReport?.capacityAfter,
+            timestamp: Date(),
+            ownershipWarningPaths: (bundleReport?.ownershipWarningPaths ?? [])
+                + (leftoverReport?.ownershipWarningPaths ?? [])
+        )
+        incrementMovedToTrashTotal(by: report.bytesMovedToTrash)
+        lastDeletionReport = report
+
+        let deletedPaths = Set(report.deletedItems.map {
+            URL(fileURLWithPath: $0.path).standardizedFileURL.path
+        }).union(homebrewGonePaths)
+        // An app leaves the picker once its bundle is trashed, or once Homebrew
+        // has removed it. Its selection clears either way, so a partial failure
+        // doesn't leave a ghost tick.
+        for (app, _) in toDelete {
+            selectedAppIDs.remove(app.id)
+            if deletedPaths.contains(app.bundleURL.standardizedFileURL.path) {
+                installedApps.removeAll { $0.id == app.id }
+            }
+        }
+        // The app and its leftovers leave the last scan's saved rows too, on screen
+        // and in the file, so none of them comes back dimmed at the next launch (#283).
+        let removedSpellings = deletedPaths.union(report.deletedItems.map(\.path))
+        removeLastScanRows { removedSpellings.contains($0.path) }
+        forgetInLastScanFile(paths: removedSpellings)
+        removeTrashedRowsEverywhere(deletedPaths: deletedPaths)
+
+        // Held apps moved nothing; surface each as one row for the whole app. It
+        // offers setup when the helper isn't on, and otherwise says what the bundle's
+        // move ran into (#299). Either way Retry removes the whole app at once.
+        let heldFailures = heldApps.map { app, items in
+            CleanFailureItem(
+                path: app.bundleURL.path,
+                displayName: app.name,
+                reason: Self.heldAppReason(
+                    bundlePath: app.bundleURL.standardizedFileURL.path,
+                    in: bundleReport
+                ),
+                sizeBytes: items.reduce(0) { $0 + $1.sizeBytes },
+                route: .lockedUninstall
+            )
+        }
+
+        progressPoller.cancel()
+        // The total on the completion screen counts what Homebrew deleted too,
+        // as the main clean does for simulators; History keeps the two apart.
+        liveSession.completeRun(
+            bytesMovedToTrash: report.bytesMovedToTrash + report.bytesRemovedDirectly,
+            elapsedSeconds: elapsedSeconds,
+            failedItems: report.userVisibleFailures + heldFailures + keptSharedFailures,
+            movedToTrashCount: report.movedToTrashCount,
+            removedPermanentlyCount: report.deletedItems.count - report.movedToTrashCount
+        )
+        if !report.ownershipWarningPaths.isEmpty { liveSession.noteTrashOwnershipWarning() }
+        homebrewNotes.forEach { liveSession.addNote($0) }
+        // History and the ledger keep the held apps and the leftovers kept for
+        // another app too, so an uninstall where no bundle moved is not saved as
+        // an empty entry (#303). Only the recorded copy gets them: the completion
+        // screen above already adds them to the report's own failures.
+        recordCleanup(report.addingFailures(heldFailures + keptSharedFailures), trigger: .manual, source: .uninstall)
+
+        // Apps that declined to quit stay installed and selected, so the user can
+        // quit them and retry. Surfaced after the success summary.
+        if !stillOpen.isEmpty {
+            errorMessage = stillOpenMessage(stillOpen)
+        }
+    }
+
+    /// Asks a running app to quit and waits up to ~2s for it to close, returning
+    /// whether it is no longer running. Graceful `terminate()`, never force: an app
+    /// with unsaved work gets its own chance to prompt, and if the user cancels
+    /// that prompt the app stays open and this returns false so the caller leaves
+    /// it installed. An app with no bundle id was never reported running, so it is
+    /// treated as clear to remove.
+    private func quitRunningApp(_ app: InstalledApp) async -> Bool {
+        guard let bundleID = app.bundleID else { return true }
+        // Two installs can share one bundle id (Xcode and Xcode-beta), so match on
+        // the bundle URL as well: quitting the copy being removed must not also
+        // terminate the other copy the user is keeping.
+        let targetURL = app.bundleURL.standardizedFileURL
+        func instances() -> [NSRunningApplication] {
+            NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+                .filter { $0.bundleURL?.standardizedFileURL == targetURL }
+        }
+        func isRunning() -> Bool { !instances().isEmpty }
+        guard isRunning() else { return true }
+        for instance in instances() {
+            instance.terminate()
+        }
+        for _ in 0..<20 {
+            if !isRunning() { return true }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return !isRunning()
+    }
+
+    private func stillOpenMessage(_ apps: [InstalledApp]) -> String {
+        let names = apps.map(\.name)
+        if names.count == 1 {
+            return String(localized: "\(names[0]) is still open, so it was left installed. Quit it and try again.")
+        }
+        let list = names.joined(separator: String(localized: ", "))
+        return String(localized: "These apps are still open, so they were left installed: \(list). Quit them and try again.")
+    }
+
+    /// Runs the access probe off the main actor.
+    ///
+    /// The probe lists `~/Library/Safari`, `~/Library/Containers`, and
+    /// `~/Library/Application Support`; on a real machine those hold hundreds of
+    /// entries, so it is genuine filesystem work. `LookDeeperView` polls it once a second
+    /// while on screen (the onboarding permissions step used to), and running it inline on the main actor showed
+    /// up in profiles as a periodic hitch during exactly the phase users described as
+    /// laggy. Publishing the result is left to the caller so it can animate the change.
+    nonisolated func probeFullDiskAccess() async -> Bool {
+        await Task.detached(priority: .utility) {
+            PermissionChecker().hasFullDiskAccess()
+        }.value
+    }
+
+    func applyFullDiskAccess(_ granted: Bool) {
+        guard hasFullDiskAccess != granted else { return }
+        hasFullDiskAccess = granted
+    }
+
+    /// Assigns only on a change: every assignment to a `@Published` property
+    /// invalidates every view observing the store, even when the value is the same.
+    func refreshPermission() {
+        let granted = scanSources.fullDiskAccess()
+        if granted != hasFullDiskAccess { hasFullDiskAccess = granted }
+    }
+
+    /// The access the next scan runs with. Refreshes the published flag on the way,
+    /// so the UI and the scan never disagree about what was readable.
+    private func currentScanAccess() -> ScanAccess {
+        refreshPermission()
+        return hasFullDiskAccess ? .full : .limited
+    }
+
+    func scanGeneral() async {
+        let access = currentScanAccess()
+        supersedeFullScan()
+        scanGeneration += 1
+        let generation = scanGeneration
+        scanPhase = .scanning
+        clearGeneralScanState()
+        await runGeneralScan(generation: generation, access: access)
+        await finishStandaloneScanIfCurrent(generation: generation)
+    }
+
+    func scanDeveloper() async {
+        let access = currentScanAccess()
+        supersedeFullScan()
+        scanGeneration += 1
+        let generation = scanGeneration
+        scanPhase = .scanning
+        clearDeveloperScanState()
+        await runDeveloperScan(generation: generation, access: access)
+        await finishStandaloneScanIfCurrent(generation: generation)
+    }
+
+    /// A standalone pass replaces any full scan in flight. That scan stops at its
+    /// next check and, no longer current, never clears its own flags. Left set,
+    /// `isScanningAll` would make the queue wait on a scan that already ended and
+    /// hold every Scan button on "Scanning...".
+    private func supersedeFullScan() {
+        scanTask?.cancel()
+        scanTask = nil
+        isScanningAll = false
+        cacheScanStage = .idle
+    }
+
+    /// True when App Caches or Dev Tools were scanned, or are being scanned, without
+    /// Full Disk Access and Purge has it now. Those results leave out everything
+    /// access unlocks, so they do not count as this session's results.
+    var cacheResultsNeedAccessRescan: Bool {
+        hasFullDiskAccess && (generalResultsAccess == .limited || developerResultsAccess == .limited)
+    }
+
+    /// Access just landed while a limited App Caches and Dev Tools scan runs. It
+    /// stops here instead of finishing results that are already out of date, and the
+    /// rescan the caller queues runs with access.
+    func interruptLimitedCacheScan() {
+        guard cacheResultsNeedAccessRescan else { return }
+        scanTask?.cancel()
+        projectDiscoveryTask?.cancel()
+    }
+
+    func scanAll() async {
+        // Every scan path funnels through here or the standalone variants. Without
+        // Full Disk Access the scanners run limited and stay out of the folders that
+        // would fire per-folder TCC prompts; see `ScanAccess`.
+        let access = currentScanAccess()
+        let previousTask = scanTask
+        let previousGeneration = scanGeneration
+        if let previousTask, !previousTask.isCancelled {
+            previousTask.cancel()
+            let cancellationIndicator = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard let self,
+                      self.scanGeneration == previousGeneration,
+                      self.scanTask != nil else { return }
+                self.scanPhase = .cancelling
+            }
+            await previousTask.value
+            cancellationIndicator.cancel()
+        }
+
+        scanGeneration += 1
+        let generation = scanGeneration
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.runFullScan(generation: generation, access: access)
+        }
+        scanTask = task
+        await task.value
+        if scanGeneration == generation {
+            scanTask = nil
+        }
+    }
+
+    private func runFullScan(generation: Int, access: ScanAccess) async {
+        let fullStart = Date()
+        ScanPhaseTiming.log("runFullScan started")
+        scanCompletionHideTask?.cancel()
+        errorMessage = nil
+        scanPhase = .scanning
+        isScanningAll = true
+        cacheScanStage = .appCaches
+        clearGeneralScanState()
+        clearDeveloperScanState()
+        // Both halves are cleared now, so both belong to this scan from here on.
+        generalResultsAccess = access
+        developerResultsAccess = access
+        defer {
+            if scanGeneration == generation {
+                isScanningAll = false
+                // Project discovery carries Dev Tools on after this returns and
+                // clears the stage itself when it ends.
+                if projectDiscoveryTask == nil {
+                    cacheScanStage = .idle
+                }
+            }
+            ScanPhaseTiming.finish("runFullScan total", since: fullStart)
+        }
+
+        // One git session for the whole scan, started before discovery. Its git
+        // check can still be running when either half below starts, and a fresh
+        // session then would drop its answers and leave its rows unknown.
+        await gitChecker.clearSessionCache()
+        await gitChecker.setAccess(access)
+        guard !Task.isCancelled, scanGeneration == generation else { return }
+
+        // Project discovery walks the home folders and needs nothing from the
+        // two scans below, so it starts with them rather than after them, and
+        // carries Dev Tools on if it is still going when they end.
+        startProjectDiscovery(generation: generation, access: access)
+        let discovery = projectDiscoveryTask
+
+        await runGeneralScan(generation: generation, access: access, inFullScan: true)
+        guard !Task.isCancelled, scanGeneration == generation else {
+            stopProjectDiscovery(discovery)
+            return
+        }
+        cacheScanStage = .devTools
+        await runDeveloperScan(generation: generation, access: access, inFullScan: true)
+        guard !Task.isCancelled, scanGeneration == generation else {
+            stopProjectDiscovery(discovery)
+            return
+        }
+        finishScan(generation: generation)
+        if projectListFinishedDuringFullScan {
+            projectListFinishedDuringFullScan = false
+            lastScanListsFinished([.projects])
+        }
+    }
+
+    /// Stops the discovery a full scan started, when that scan is stopped or
+    /// replaced before its Dev Tools half ends. A newer scan's discovery is
+    /// left alone.
+    private func stopProjectDiscovery(_ discovery: Task<Void, Never>?) {
+        guard let discovery, projectDiscoveryTask == discovery else { return }
+        discovery.cancel()
+        projectDiscoveryTask = nil
+        isScanningProjects = false
+    }
+
+    /// `inFullScan` is true when `runFullScan` runs this half. That scan has
+    /// started the git session for both halves and its project discovery.
+    private func runGeneralScan(generation: Int, access: ScanAccess, inFullScan: Bool = false) async {
+        let generalStart = Date()
+        scanCompletionHideTask?.cancel()
+        errorMessage = nil
+        isScanningGeneral = true
+        generalResultsAccess = access
+        readableWithoutFullDiskAccess.removeAll()
+        if !inFullScan {
+            await gitChecker.clearSessionCache()
+            await gitChecker.setAccess(access)
+        }
+        defer {
+            if scanGeneration == generation {
+                isScanningGeneral = false
+            }
+            ScanPhaseTiming.finish("runGeneralScan total", since: generalStart)
+        }
+
+        let streamStart = Date()
+        var cacheItemsFound = 0
+        var cacheSizesResolved = 0
+        let coalesce = CacheScanCoalesceBuffers()
+        defer { coalesce.debounceTask?.cancel() }
+
+        for await event in scanSources.general(access) {
+            guard scanGeneration == generation, !Task.isCancelled else { return }
+            switch event {
+            case .found(let item):
+                cacheItemsFound += 1
+                coalesce.ingestFound(item)
+                scheduleCacheScanFlush(coalesce: coalesce, generation: generation)
+            case .sizeResolved(let path, let sizeBytes, let lastModified):
+                cacheSizesResolved += 1
+                coalesce.ingestSize(path: path, sizeBytes: sizeBytes, lastModified: lastModified)
+                scheduleCacheScanFlush(coalesce: coalesce, generation: generation)
+            }
+        }
+        coalesce.debounceTask?.cancel()
+        flushCacheScanBuffers(coalesce: coalesce, animate: true)
+        ScanPhaseTiming.finish(
+            "runGeneralScan stream",
+            since: streamStart,
+            detail: "\(cacheItemsFound) items found, \(cacheSizesResolved) sizes resolved"
+        )
+
+        guard scanGeneration == generation, !Task.isCancelled else { return }
+        let hydrateStart = Date()
+        let hydrateCount = cacheItems.count
+        await hydrateCacheSafetyMetadataParallel(generation: generation)
+        ScanPhaseTiming.finish(
+            "git enrichment (cache hydrate)",
+            since: hydrateStart,
+            detail: "\(hydrateCount) cache items"
+        )
+        if scanGeneration == generation, !Task.isCancelled {
+            hasSessionGeneralScan = true
+            lastScanListsFinished([.appCaches])
+        }
+    }
+
+    /// `inFullScan` is true when `runFullScan` runs this half. That scan has
+    /// started the git session for both halves and its project discovery.
+    private func runDeveloperScan(generation: Int, access: ScanAccess, inFullScan: Bool = false) async {
+        let developerStart = Date()
+        scanCompletionHideTask?.cancel()
+        errorMessage = nil
+        simulatorSizingGeneration += 1
+        isScanningDeveloper = true
+        developerResultsAccess = access
+        readableWithoutFullDiskAccess.removeAll()
+        if !inFullScan {
+            await gitChecker.clearSessionCache()
+            await gitChecker.setAccess(access)
+        }
+        defer {
+            if scanGeneration == generation {
+                isScanningDeveloper = false
+            }
+            ScanPhaseTiming.finish("runDeveloperScan total", since: developerStart)
+        }
+
+        let streamStart = Date()
+        var devToolsFound = 0
+        var devToolSizesResolved = 0
+        var simulatorsFound = 0
+        var simulatorSizesResolved = 0
+        let coalesce = DeveloperScanCoalesceBuffers()
+        defer { coalesce.debounceTask?.cancel() }
+
+        for await event in scanSources.developer(access) {
+            guard scanGeneration == generation, !Task.isCancelled else { return }
+            switch event {
+            case .devToolFound(let tool):
+                devToolsFound += 1
+                coalesce.ingestDevTool(tool)
+                scheduleDeveloperScanFlush(coalesce: coalesce, generation: generation)
+            case .devToolSizeResolved(let id, let pathSizes, let sizeBytes, let lastModified):
+                devToolSizesResolved += 1
+                coalesce.ingestDevToolSize(
+                    id: id,
+                    pathSizeBytesByPath: pathSizes,
+                    sizeBytes: sizeBytes,
+                    lastModified: lastModified
+                )
+                scheduleDeveloperScanFlush(coalesce: coalesce, generation: generation)
+            case .projectGroupFound:
+                break
+            case .simulatorFound(let simulator):
+                simulatorsFound += 1
+                coalesce.ingestSimulator(simulator)
+                scheduleDeveloperScanFlush(coalesce: coalesce, generation: generation)
+            case .simulatorSizeResolved(let id, let sizeBytes):
+                simulatorSizesResolved += 1
+                coalesce.ingestSimulatorSize(id: id, sizeBytes: sizeBytes)
+                scheduleDeveloperScanFlush(coalesce: coalesce, generation: generation)
+            case .simulatorRuntimeFound(let runtime):
+                coalesce.ingestSimulatorRuntime(runtime)
+                scheduleDeveloperScanFlush(coalesce: coalesce, generation: generation)
+            case .runningSimulatorsFound(let devices):
+                runningSimulatorDevices = devices.sorted { ($0.sizeOnDisk ?? 0) > ($1.sizeOnDisk ?? 0) }
+            }
+        }
+        coalesce.debounceTask?.cancel()
+        flushDeveloperScanBuffers(coalesce: coalesce, animate: false)
+        // The scan moves a runtime excluded by path before #178 to the runtime
+        // list, so Settings would show neither until the lists are read again.
+        refreshExclusionListsIfChanged()
+        ScanPhaseTiming.finish(
+            "runDeveloperScan stream",
+            since: streamStart,
+            detail: "\(devToolsFound) dev tools, \(devToolSizesResolved) tool sizes, \(simulatorsFound) simulators, \(simulatorSizesResolved) sim sizes"
+        )
+
+        guard scanGeneration == generation, !Task.isCancelled else { return }
+        let needsToolRepoHydration = devTools.contains { !$0.paths.isEmpty }
+        if needsToolRepoHydration {
+            developerEnrichmentCount += 1
+            defer { developerEnrichmentCount = max(0, developerEnrichmentCount - 1) }
+            let hydrateStart = Date()
+            let pathCount = devTools.flatMap(\.paths).count
+            await hydrateDeveloperToolRepoStatusesParallel(generation: generation)
+            ScanPhaseTiming.finish(
+                "git enrichment (dev tool repo hydrate)",
+                since: hydrateStart,
+                detail: "\(pathCount) dev tool paths"
+            )
+        }
+
+        if scanGeneration == generation, !Task.isCancelled {
+            lastScanListsFinished([.devTools, .simulators, .runtimes])
+        }
+        if !inFullScan {
+            startProjectDiscovery(generation: generation, access: access)
+        }
+    }
+
+    private func startProjectDiscovery(generation: Int, access: ScanAccess) {
+        projectDiscoveryTask?.cancel()
+        projectListFinishedDuringFullScan = false
+        projectDiscoveryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let discoveryStart = Date()
+            isScanningProjects = true
+            defer {
+                if self.scanGeneration == generation {
+                    self.isScanningProjects = false
+                    self.projectDiscoveryTask = nil
+                    // A full scan still running ends the stage itself.
+                    if !self.isScanningAll {
+                        self.cacheScanStage = .idle
+                    }
+                    // Project artifacts land after `finishScan`, so the Dev Tools
+                    // record catches up once discovery settles.
+                    self.categoryInputsDidChange()
+                }
+                ScanPhaseTiming.finish("startProjectDiscovery total", since: discoveryStart)
+            }
+
+            let streamStart = Date()
+            var projectGroupsFound = 0
+            let coalesce = ProjectGroupCoalesceBuffers()
+            defer { coalesce.debounceTask?.cancel() }
+
+            for await event in scanSources.projects(access) {
+                guard scanGeneration == generation, !Task.isCancelled else { return }
+                switch event {
+                case .projectGroupFound(let group):
+                    projectGroupsFound += 1
+                    coalesce.ingest(group)
+                    scheduleProjectGroupFlush(coalesce: coalesce, generation: generation)
+                default:
+                    break
+                }
+            }
+            coalesce.debounceTask?.cancel()
+            // A stopped or replaced discovery gets here too, when its stream ends.
+            // What it still holds belongs to a list a newer scan has cleared, where
+            // the newer discovery's git check would mark it clean (#173).
+            guard scanGeneration == generation, !Task.isCancelled else { return }
+            flushProjectGroupBuffers(coalesce: coalesce, animate: false)
+            // Ended before the full scan it started with: the list is saved when
+            // that scan finishes, as it was when discovery only ran after it.
+            if isScanningAll {
+                projectListFinishedDuringFullScan = true
+            } else {
+                lastScanListsFinished([.projects])
+            }
+            ScanPhaseTiming.finish(
+                "discoverProjects stream",
+                since: streamStart,
+                detail: "\(projectGroupsFound) project groups published"
+            )
+
+            guard !projectGroups.isEmpty else { return }
+            developerEnrichmentCount += 1
+            defer { developerEnrichmentCount = max(0, developerEnrichmentCount - 1) }
+            let hydrateStart = Date()
+            let artifactCount = projectGroups.flatMap(\.artifacts).count
+            await hydrateDeveloperGitStatusesParallel(generation: generation)
+            ScanPhaseTiming.finish(
+                "git enrichment (project artifact hydrate)",
+                since: hydrateStart,
+                detail: "\(artifactCount) project artifacts"
+            )
+        }
+    }
+
+    private func finishStandaloneScanIfCurrent(generation: Int) async {
+        guard scanGeneration == generation, !Task.isCancelled else { return }
+        finishScan(generation: generation)
+    }
+
+    private func finishScan(generation: Int) {
+        guard scanGeneration == generation else { return }
+        let completedAt = Date()
+        lastScanCompletedAt = completedAt
+        defaults.set(completedAt, forKey: StorageKeys.lastScanCompletedAt)
+        persistLastScanSafeRecoverableBytes()
+        hasSessionCacheScan = true
+        stampScanRecords([.appCaches, .devTools], at: completedAt)
+        scanPhase = .completed
+        scanCompletionHideTask?.cancel()
+        scanCompletionHideTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard let self, self.scanGeneration == generation, self.scanPhase == .completed else { return }
+            withAnimation(.easeInOut(duration: 0.25)) {
+                self.scanPhase = .idle
+            }
+        }
+    }
+
+    private func persistLastScanSafeRecoverableBytes() {
+        let bytes = safeRecoverableBytes
+        lastScanSafeRecoverableBytes = bytes
+        defaults.set(bytes, forKey: StorageKeys.lastScanSafeRecoverableBytes)
+    }
+
+    // MARK: - Category totals and scan records
+
+    /// Count and size of what one category found. The tab subtitles (with no filter
+    /// applied), the sidebar and the Overview all read these, so they cannot drift apart.
+    struct CategoryTotals: Equatable {
+        var count: Int = 0
+        var bytes: Int64 = 0
+    }
+
+    var appCachesTotals: CategoryTotals {
+        cacheItems.reduce(into: CategoryTotals()) { totals, item in
+            guard SafetyFilter.all.matches(item.safetyInfo) else { return }
+            totals.count += 1
+            totals.bytes += item.sizeBytes
+        }
+    }
+
+    var devToolsTotals: CategoryTotals {
+        var totals = CategoryTotals()
+        for tool in devTools where tool.isDetected && tool.safetyInfo.level != .unknown {
+            totals.count += 1
+            totals.bytes += tool.sizeBytes
+        }
+        for device in simulatorDevices where device.safetyInfo.level != .unknown {
+            totals.count += 1
+            totals.bytes += device.sizeOnDisk ?? 0
+        }
+        for runtime in simulatorRuntimes where runtime.safetyInfo.level != .unknown {
+            totals.count += 1
+            totals.bytes += runtime.sizeBytes
+        }
+        for artifact in projectGroups.flatMap(\.artifacts) where artifact.safetyInfo.level != .unknown {
+            totals.count += 1
+            totals.bytes += artifact.sizeBytes
+        }
+        return totals
+    }
+
+    var largeFilesTotals: CategoryTotals {
+        CategoryTotals(count: largeFiles.count, bytes: largeFiles.reduce(Int64(0)) { $0 + $1.sizeBytes })
+    }
+
+    var appsTotals: CategoryTotals {
+        CategoryTotals(
+            count: installedApps.count,
+            bytes: installedApps.reduce(Int64(0)) { $0 + removableBytes(for: $1) }
+        )
+    }
+
+    var leftoversTotals: CategoryTotals {
+        CategoryTotals(count: orphanLeftovers.count, bytes: orphanLeftovers.reduce(Int64(0)) { $0 + $1.sizeBytes })
+    }
+
+    func totals(for category: OverviewCategory) -> CategoryTotals {
+        switch category {
+        case .appCaches: return appCachesTotals
+        case .devTools: return devToolsTotals
+        case .largeFiles: return largeFilesTotals
+        case .apps: return appsTotals
+        case .leftovers: return leftoversTotals
+        }
+    }
+
+    /// True once the category's scan has finished in this session and nothing is
+    /// still adding to it, so its live figures are complete.
+    func isSettled(_ category: OverviewCategory) -> Bool {
+        switch category {
+        case .appCaches:
+            return hasSessionCacheScan && !isScanningAll && !isScanningGeneral
+        case .devTools:
+            return hasSessionCacheScan && !isScanningAll && !isScanningDeveloper && !isScanningProjects
+        case .largeFiles:
+            return hasCompletedLargeFileScan && !isScanningLargeFiles
+        case .apps:
+            return hasCompletedInstalledAppsScan && !isScanningInstalledApps && !isMeasuringRemovableTotals
+                && hasFinishedMeasuringApps
+        case .leftovers:
+            return hasCompletedOrphanScan && !isScanningOrphans
+        }
+    }
+
+    /// The scan queue just made the App Caches and Dev Tools step active and is about
+    /// to start `scanAll`. Marking it now, in the same turn, keeps the Overview from
+    /// showing old figures as done for the moment before the scan begins.
+    func markCacheScanStarting() {
+        cacheScanStage = .appCaches
+    }
+
+    /// Whether this session holds results for the step, so opening its tab needs no scan.
+    func hasSessionResults(for step: ScanStep) -> Bool {
+        switch step {
+        case .cachesAndDevTools:
+            guard !cacheResultsNeedAccessRescan else { return false }
+            return hasSessionCacheScan || !cacheItems.isEmpty || !devTools.isEmpty || !projectGroups.isEmpty
+        case .largeFiles:
+            // Rows found under other filters than today's are not results for
+            // today's: the tab scans again, and the Overview shows no figure.
+            return hasCompletedLargeFileScan && completedLargeFileFilter == largeFileFilter
+        case .apps:
+            return hasCompletedInstalledAppsScan && hasFinishedMeasuringApps
+        case .leftovers:
+            return hasCompletedOrphanScan
+        case .everythingElse:
+            // A walk made without Full Disk Access is out of date once access
+            // lands: the locked groups can be read now.
+            guard let measurement = everythingElseMeasurement, measurement.isComplete else { return false }
+            return !(measurement.access == .limited && hasFullDiskAccess)
+        case .commandLineTools:
+            return hasCompletedCommandLineToolScan
+        }
+    }
+
+    /// The size and last-used filters a Large Files scan runs under right now.
+    var largeFileFilter: LargeFileFilterSnapshot {
+        LargeFileFilterSnapshot.current(userDefaults: defaults)
+    }
+
+    /// Records a finished scan: the date, plus the figures it found. A Large Files
+    /// scan passes the filters it ran under, so its record can say what it counted.
+    private func stampScanRecords(
+        _ categories: [OverviewCategory],
+        at date: Date = Date(),
+        largeFileFilter: LargeFileFilterSnapshot? = nil
+    ) {
+        for category in categories {
+            let totals = totals(for: category)
+            saveScanRecord(
+                ScanRecord(
+                    completedAt: date,
+                    bytes: totals.bytes,
+                    count: totals.count,
+                    safeBytes: safeCleanupBytes(for: category),
+                    largeFileFilter: category == .largeFiles ? largeFileFilter : nil,
+                    largeFileCategories: category == .largeFiles ? ScanRecord.largeFileCategoryTotals(of: largeFiles) : nil
+                ),
+                for: category
+            )
+        }
+    }
+
+    /// Something a category total reads changed. Invalidates the Overview cache and
+    /// keeps each settled record's figures in step with what is on screen after a
+    /// clean or uninstall, without touching its date. The record write is coalesced,
+    /// because the inputs change many times in a row while metadata passes rewrite rows.
+    private func categoryInputsDidChange() {
+        categoryInputsRevision &+= 1
+        guard scanRecordRefreshTask == nil else { return }
+        scanRecordRefreshTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard let self else { return }
+            self.scanRecordRefreshTask = nil
+            for category in OverviewCategory.allCases where self.isSettled(category) && self.hasFinishedLists(for: category) {
+                guard var record = self.scanRecords[category] else { continue }
+                let totals = self.totals(for: category)
+                let safeBytes = self.safeCleanupBytes(for: category)
+                let largeFileCategories = category == .largeFiles
+                    ? ScanRecord.largeFileCategoryTotals(of: self.largeFiles)
+                    : record.largeFileCategories
+                guard record.bytes != totals.bytes || record.count != totals.count || record.safeBytes != safeBytes
+                    || record.largeFileCategories != largeFileCategories
+                else { continue }
+                record.bytes = totals.bytes
+                record.count = totals.count
+                record.safeBytes = safeBytes
+                record.largeFileCategories = largeFileCategories
+                self.saveScanRecord(record, for: category)
+            }
+        }
+    }
+
+    private func saveScanRecord(_ record: ScanRecord, for category: OverviewCategory) {
+        guard scanRecords[category] != record else { return }
+        scanRecords[category] = record
+        scanRecordStore.save(record, for: category)
+    }
+
+    // MARK: Hooks for the scan queue
+
+    /// Waits for a `scanAll` someone else started (the menu bar, a Look Deeper reveal)
+    /// instead of cancelling it and starting over.
+    func awaitInFlightFullScan() async {
+        await scanTask?.value
+    }
+
+    /// Project discovery runs beside the Dev Tools scan and can outlast it.
+    func awaitProjectDiscovery() async {
+        await projectDiscoveryTask?.value
+    }
+
+    func awaitRemovableTotals() async {
+        await removableTotalsTask?.value
+    }
+
+    func cancelRemovableTotals() {
+        removableTotalsTask?.cancel()
+    }
+
+    // MARK: - Scheduled cleaning
+
+    struct ScheduledCleaningSummary {
+        let deletedCount: Int
+        /// Bytes moved to the trash, pending until the trash is emptied.
+        let bytesMovedToTrash: Int64
+        /// Real engine time for the deletion run, in seconds.
+        var elapsedSeconds: Double = 0
+        var movedToTrashCount: Int = 0
+        var failedItems: [CleanFailureItem] = []
+        /// True when another clean was running, or a review was open for a
+        /// scheduled clean, so this one removed nothing. A scheduled clean then
+        /// stays due instead of counting as done (#173).
+        var skippedForAnotherClean = false
+        /// True when the engine threw, or nothing was moved and at least one item
+        /// failed. A scheduled clean then stays due instead of counting as done,
+        /// and the next activation tries again (#173).
+        var failed = false
+
+        var failedCount: Int { failedItems.count }
+    }
+
+    @discardableResult
+    func performScheduledClean() async -> ScheduledCleaningSummary {
+        await performScheduledClean(preferences: .shared)
+    }
+
+    /// Reads whether scheduled cleaning is on from `preferences`. Tests pass ones
+    /// kept in throwaway defaults, never the user's own.
+    @discardableResult
+    func performScheduledClean(preferences: ScheduledCleaningPreferenceStore) async -> ScheduledCleaningSummary {
+        // `performSafeCleanup` reruns the developer scan with the access Purge has
+        // now, then checks every candidate with `ProtectedLocations.isReadable`
+        // before it moves, so a revoked grant never cleans a locked folder.
+        guard preferences.isEnabled else {
+            return ScheduledCleaningSummary(deletedCount: 0, bytesMovedToTrash: 0)
+        }
+        return await performSafeCleanup(
+            historyTrigger: .scheduled,
+            scheduledNotifications: true,
+            clearSelectionsAfterCleanup: false
+        )
+    }
+
+    /// Immediate safe cleanup from the menu bar (does not require scheduled cleaning to be enabled).
+    @discardableResult
+    /// - Parameter progressBuffer: Receives engine progress when no interactive
+    ///   cleanup owns it, so the menu bar can show real bytes moved.
+    func performManualSafeCleanNow(
+        pinnedCandidates: [DeletionCandidate]? = nil,
+        progressBuffer: DeletionProgressBuffer? = nil
+    ) async -> ScheduledCleaningSummary {
+        var onProgress: (@Sendable (DeletionProgressEvent) -> Void)?
+        if let buffer = interactiveSafeCleanupProgressBuffer ?? progressBuffer {
+            onProgress = { @Sendable event in buffer.ingest(event) }
+        }
+        let summary = await performSafeCleanup(
+            historyTrigger: .manual,
+            scheduledNotifications: false,
+            clearSelectionsAfterCleanup: true,
+            pinnedCandidates: pinnedCandidates,
+            onProgress: onProgress
+        )
+        publishOnboardingCelebrationIfNeeded(movedToTrashBytes: summary.bytesMovedToTrash)
+        return summary
+    }
+
+    func beginInteractiveSafeCleanup(
+        candidates: [DeletionCandidate],
+        reduceMotion: Bool,
+        presentsLiveSession: Bool = false
+    ) -> Bool {
+        guard !isDeleting, interactiveSafeCleanupTargetPaths.isEmpty else { return false }
+        let orderedPaths = Self.uniqueStandardizedPaths(for: candidates)
+        guard !orderedPaths.isEmpty else { return false }
+
+        errorMessage = nil
+        interactiveSafeCleanupRemovalTask?.cancel()
+        interactiveSafeCleanupMovedToTrashBytes = nil
+        interactiveSafeCleanupTargetPaths = Set(orderedPaths)
+        let startedAt = Date()
+        interactiveCleanupStartedAt = startedAt
+
+        if presentsLiveSession {
+            // Same choreography as manual deletion: present the overlay in its
+            // cleaning phase now and poll engine progress into it.
+            var seenPaths = Set<String>()
+            var totalBytes: Int64 = 0
+            for candidate in candidates {
+                let path = candidate.path.standardizedFileURL.path
+                guard !seenPaths.contains(path) else { continue }
+                seenPaths.insert(path)
+                totalBytes += candidate.sizeBytes
+            }
+            let liveSession = DeletionSession(
+                totalBytes: totalBytes,
+                totalItems: orderedPaths.count,
+                startedAt: startedAt
+            )
+            interactiveSafeCleanupSession = liveSession
+            let buffer = DeletionProgressBuffer()
+            interactiveSafeCleanupProgressBuffer = buffer
+            interactiveSafeCleanupProgressPoller = liveSession.pollProgress(from: buffer)
+        }
+
+        if reduceMotion {
+            interactiveSafeCleanupRemovedPaths = Set(orderedPaths)
+        } else {
+            interactiveSafeCleanupRemovedPaths = []
+            interactiveSafeCleanupRemovalTask = Task { @MainActor [weak self] in
+                for path in orderedPaths {
+                    guard let self, !Task.isCancelled else { return }
+                    withAnimation(.easeInOut(duration: 0.22)) {
+                        self.interactiveSafeCleanupRemovedPaths.insert(path)
+                    }
+                    try? await Task.sleep(nanoseconds: 80_000_000)
+                }
+            }
+        }
+
+        return true
+    }
+
+    func completeInteractiveSafeCleanup(summary: ScheduledCleaningSummary) {
+        // A pending onboarding celebration already owns the post-clean screen. Since no
+        // live session was presented for this run, synthesizing a completed session here
+        // would stack the standard summary beneath the celebration, surfacing a second
+        // screen once the celebration is dismissed. Tear down the interactive state only.
+        if defaults.bool(forKey: Self.pendingOnboardingCelebrationKey) {
+            cancelInteractiveSafeCleanup()
+            return
+        }
+        interactiveSafeCleanupMovedToTrashBytes = summary.bytesMovedToTrash
+        interactiveSafeCleanupProgressPoller?.cancel()
+        interactiveSafeCleanupProgressPoller = nil
+        interactiveSafeCleanupProgressBuffer = nil
+        if let liveSession = interactiveSafeCleanupSession, liveSession.isLiveRun {
+            liveSession.completeRun(
+                bytesMovedToTrash: summary.bytesMovedToTrash,
+                elapsedSeconds: summary.elapsedSeconds,
+                failedItems: summary.failedItems,
+                movedToTrashCount: summary.movedToTrashCount
+            )
+        } else {
+            let elapsedSeconds = interactiveCleanupStartedAt.map {
+                Date().timeIntervalSince($0)
+            } ?? summary.elapsedSeconds
+            interactiveSafeCleanupSession = .completed(
+                bytesMovedToTrash: summary.bytesMovedToTrash,
+                elapsedSeconds: elapsedSeconds,
+                movedToTrashCount: summary.movedToTrashCount,
+                failedItems: summary.failedItems,
+                startedAt: interactiveCleanupStartedAt
+            )
+        }
+        interactiveCleanupStartedAt = nil
+    }
+
+    func cancelInteractiveSafeCleanup() {
+        interactiveSafeCleanupRemovalTask?.cancel()
+        interactiveSafeCleanupRemovalTask = nil
+        interactiveSafeCleanupProgressPoller?.cancel()
+        interactiveSafeCleanupProgressPoller = nil
+        interactiveSafeCleanupProgressBuffer = nil
+        interactiveCleanupStartedAt = nil
+        interactiveSafeCleanupTargetPaths = []
+        interactiveSafeCleanupRemovedPaths = []
+        interactiveSafeCleanupMovedToTrashBytes = nil
+        interactiveSafeCleanupSession = nil
+    }
+
+    func dismissInteractiveSafeCleanupCelebration() {
+        cancelInteractiveSafeCleanup()
+    }
+
+    /// The Overview's Clean button: moves every safe App Caches and Dev Tools item to
+    /// the Trash, the same set the menu bar and the scheduled clean move, with the
+    /// cleanup overlay showing progress and the summary.
+    /// Returns the running clean, so the Clean Safe Junk action can report what
+    /// it moved, or nil when nothing started.
+    @discardableResult
+    func cleanSafeItemsFromOverview(reduceMotion: Bool) -> Task<ScheduledCleaningSummary, Never>? {
+        let candidates = manualSafeCleanupCandidates()
+        // A pending onboarding celebration owns the post-clean screen; presenting
+        // the live session too would stack two summaries on the same run.
+        let pendingCelebration = defaults.bool(forKey: Self.pendingOnboardingCelebrationKey)
+        guard beginInteractiveSafeCleanup(
+            candidates: candidates,
+            reduceMotion: reduceMotion,
+            presentsLiveSession: !pendingCelebration
+        ) else { return nil }
+
+        return Task { @MainActor in
+            let summary = await performManualSafeCleanNow(pinnedCandidates: candidates)
+            if errorMessage == nil {
+                completeInteractiveSafeCleanup(summary: summary)
+            } else {
+                cancelInteractiveSafeCleanup()
+            }
+            return summary
+        }
+    }
+
+    private static func uniqueStandardizedPaths(for candidates: [DeletionCandidate]) -> [String] {
+        var seen = Set<String>()
+        var paths: [String] = []
+        for candidate in candidates {
+            let path = candidate.path.standardizedFileURL.path
+            guard !seen.contains(path) else { continue }
+            seen.insert(path)
+            paths.append(path)
+        }
+        return paths
+    }
+
+    static let pendingOnboardingCelebrationKey = "onboarding.pendingCelebration"
+
+    private func publishOnboardingCelebrationIfNeeded(movedToTrashBytes: Int64) {
+        guard defaults.bool(forKey: Self.pendingOnboardingCelebrationKey) else { return }
+        onboardingCelebrationMovedToTrashBytes = movedToTrashBytes
+    }
+
+    private func performSafeCleanup(
+        historyTrigger: CleanupTrigger,
+        scheduledNotifications: Bool,
+        clearSelectionsAfterCleanup: Bool,
+        pinnedCandidates: [DeletionCandidate]? = nil,
+        onProgress: (@Sendable (DeletionProgressEvent) -> Void)? = nil
+    ) async -> ScheduledCleaningSummary {
+        // Pinned candidates skip the rescan that would otherwise set this, and the
+        // checker must not keep `.full` from a scan made before access was revoked.
+        await gitChecker.setAccess(currentScanAccess())
+        var includesProjects = true
+        if pinnedCandidates == nil {
+            includesProjects = await rescanBeforeSafeCleanup()
+        }
+
+        let syncCandidates = pinnedCandidates ?? manualSafeCleanupCandidates(includingProjects: includesProjects)
+        let access = currentScanAccess()
+        await gitChecker.setAccess(access)
+
+        // Access can be turned off after a full scan. Moving something out of a
+        // protected folder without it would prompt, so it waits for access again.
+        // When cache rows are already listed this clean reuses them rather than
+        // rescanning, so a folder excluded since that scan is checked here.
+        let readable = syncCandidates.filter {
+            ProtectedLocations.isReadable($0.path, access: access) && !ExcludedPathsStore.isExcluded($0.path)
+        }
+        // One check for every candidate, so unrelated repositories overlap (#190).
+        let gitStatuses = await gitChecker.cleanupStatuses(for: readable.map(\.path))
+
+        var combined: [URL] = []
+        var pathToDisplayName: [String: String] = [:]
+        var pathToExpectedSizeBytes: [String: Int64] = [:]
+        let toolPaths = devTools.map(\.standardizedPaths)
+        for candidate in Self.gitCleanCandidates(readable, statuses: gitStatuses, keptTogether: toolPaths) {
+            let std = candidate.path.standardizedFileURL
+            combined.append(std)
+            pathToDisplayName[std.path] = candidate.title
+            pathToExpectedSizeBytes[std.path] = candidate.sizeBytes
+        }
+
+        guard !combined.isEmpty else {
+            if scheduledNotifications {
+                await ScheduledCleanupNotifier.notifyNothingEligible()
+            }
+            return ScheduledCleaningSummary(deletedCount: 0, bytesMovedToTrash: 0)
+        }
+
+        // No await between this check and the claim, so nothing starts in between.
+        guard mayStartSafeClean(trigger: historyTrigger) else {
+            return ScheduledCleaningSummary(deletedCount: 0, bytesMovedToTrash: 0, skippedForAnotherClean: true)
+        }
+
+        isDeleting = true
+        errorMessage = nil
+        defer { isDeleting = false }
+
+        let engineStart = Date()
+        do {
+            let report = try await fileDeleter.deleteItems(
+                at: combined,
+                pathToDisplayName: pathToDisplayName,
+                pathToExpectedSizeBytes: pathToExpectedSizeBytes,
+                onProgress: onProgress
+            )
+            let elapsedSeconds = Date().timeIntervalSince(engineStart)
+            let movedBytes = report.bytesMovedToTrash
+            incrementMovedToTrashTotal(by: movedBytes)
+            reflectDeletionReportInScanState(report)
+            recordCleanup(report, trigger: historyTrigger, source: .clean)
+            if clearSelectionsAfterCleanup {
+                clearAllSelections()
+            }
+            // Nothing moved and something failed: the clean did not do its job. A
+            // clean that moved some items counts as done; the rest are listed as failed.
+            let failed = report.movedNothingAndFailed
+            if scheduledNotifications {
+                if failed {
+                    await ScheduledCleanupNotifier.notifyScheduledCleanFailed()
+                } else {
+                    await ScheduledCleanupNotifier.notifyScheduledCleanFinished(
+                        bytesMovedToTrash: movedBytes,
+                        deletedCount: report.deletedItems.count
+                    )
+                }
+            }
+            return ScheduledCleaningSummary(
+                deletedCount: report.deletedItems.count,
+                bytesMovedToTrash: movedBytes,
+                elapsedSeconds: elapsedSeconds,
+                movedToTrashCount: report.movedToTrashCount,
+                failedItems: report.userVisibleFailures,
+                failed: failed
+            )
+        } catch {
+            if scheduledNotifications {
+                await ScheduledCleanupNotifier.notifyScheduledCleanFailed()
+            } else {
+                errorMessage = String(localized: "Unable to clean safe items. Please try again.")
+            }
+            return ScheduledCleaningSummary(deletedCount: 0, bytesMovedToTrash: 0, failed: true)
+        }
+    }
+
+    /// The rescan a safe clean runs when no caller hands it a list, which is the
+    /// scheduled clean. App Caches go first. Each standalone scan starts a new
+    /// generation, and one started after Dev Tools stopped the project discovery
+    /// Dev Tools leaves running: Dev Tools then showed "scanning" until the next
+    /// rescan, and the clean left out every project (#173). The clean list is
+    /// built from those projects, so this also waits for discovery to settle.
+    ///
+    /// The wait has the same limit as the queue's own App Caches and Dev Tools step,
+    /// `cacheStepPatience`, because the queue stays held until it ends. Returns false
+    /// when discovery was still running then, and the clean leaves projects out.
+    @discardableResult
+    func rescanBeforeSafeCleanup() async -> Bool {
+        // Waits out a queued scan and keeps the next one from starting, so these
+        // two never walk the disk beside it or cut a queued full scan short.
+        await withScanQueueHeld {
+            let reusesCacheRows = !cacheItems.isEmpty
+            if !reusesCacheRows {
+                await scanGeneral()
+            }
+            await scanDeveloper()
+            // Rows already listed are not rescanned. Their git status is read again
+            // after the Dev Tools scan has cleared the git cache, as before.
+            if reusesCacheRows {
+                await hydrateCacheSafetyMetadataParallel(generation: scanGeneration)
+            }
+            if let discovery = projectDiscoveryTask {
+                await Self.waitForStep(discovery, patience: cacheStepPatience)
+            }
+            return !isScanningProjects
+        }
+    }
+
+    private func dedupeCacheItemsByPath(_ items: [CacheItem]) -> [CacheItem] {
+        var seenPaths = Set<String>()
+        return items.compactMap { item in
+            let kept = item.locations.filter { location in
+                let path = location.path.standardizedFileURL.path
+                guard !seenPaths.contains(path) else { return false }
+                seenPaths.insert(path)
+                return true
+            }
+            guard !kept.isEmpty else { return nil }
+            guard kept.count != item.locations.count else { return item }
+            return item.withLocations(kept)
+        }
+    }
+
+    private func clearGeneralScanState() {
+        lastScanListsStarted([.appCaches])
+        pendingCacheSizePaths = []
+        cacheItems = []
+        stagedGeneralCacheItems = []
+        scanSelection.cacheIDs.removeAll()
+        isEnrichingGeneral = false
+    }
+
+    private func clearDeveloperScanState() {
+        lastScanListsStarted([.devTools, .simulators, .runtimes, .projects])
+        projectDiscoveryTask?.cancel()
+        projectDiscoveryTask = nil
+        isScanningProjects = false
+        pendingDevToolSizeIDs = []
+        pendingProjectArtifactPaths = []
+        devTools = []
+        stagedDevToolsByID = [:]
+        simulatorDevices = []
+        stagedSimulatorsByID = [:]
+        simulatorRuntimes = []
+        runningSimulatorDevices = []
+        projectGroups = []
+        scanSelection.devToolIDs.removeAll()
+        scanSelection.simulatorIDs.removeAll()
+        scanSelection.simulatorRuntimeIDs.removeAll()
+        scanSelection.artifactIDs.removeAll()
+        devToolRepoStatusByPath = [:]
+        developerEnrichmentCount = 0
+    }
+
+    // MARK: - Scan stream coalescing
+
+    /// Shared state for the scan flush throttle. See `scheduleFlush(_:generation:flush:)`.
+    private protocol ScanCoalesceBuffer: AnyObject {
+        var debounceTask: Task<Void, Never>? { get set }
+        var lastFlushAt: ContinuousClock.Instant? { get set }
+        var eventCount: Int { get }
+    }
+
+    private final class CacheScanCoalesceBuffers: ScanCoalesceBuffer {
+        var pendingFound: [CacheItem] = []
+        var pendingSizeUpdates: [String: (sizeBytes: Int64, lastModified: Date)] = [:]
+        var debounceTask: Task<Void, Never>?
+        var lastFlushAt: ContinuousClock.Instant?
+
+        var eventCount: Int { pendingFound.count + pendingSizeUpdates.count }
+
+        func ingestFound(_ item: CacheItem) {
+            pendingFound.append(item)
+        }
+
+        func ingestSize(path: String, sizeBytes: Int64, lastModified: Date) {
+            pendingSizeUpdates[path] = (sizeBytes, lastModified)
+        }
+
+        func takeSnapshot() -> (found: [CacheItem], sizes: [String: (sizeBytes: Int64, lastModified: Date)]) {
+            let snapshot = (pendingFound, pendingSizeUpdates)
+            pendingFound.removeAll(keepingCapacity: true)
+            pendingSizeUpdates.removeAll(keepingCapacity: true)
+            return snapshot
+        }
+    }
+
+    private struct DevToolSizeUpdate {
+        let pathSizeBytesByPath: [String: Int64]
+        let sizeBytes: Int64
+        let lastModified: Date
+    }
+
+    private final class DeveloperScanCoalesceBuffers: ScanCoalesceBuffer {
+        var pendingTools: [String: DevTool] = [:]
+        var pendingToolSizes: [String: DevToolSizeUpdate] = [:]
+        var pendingSimulators: [UUID: SimulatorDevice] = [:]
+        var pendingSimulatorSizes: [UUID: Int64] = [:]
+        var pendingSimulatorRuntimes: [String: SimulatorRuntime] = [:]
+        var debounceTask: Task<Void, Never>?
+        var lastFlushAt: ContinuousClock.Instant?
+
+        var eventCount: Int {
+            pendingTools.count + pendingToolSizes.count + pendingSimulators.count
+                + pendingSimulatorSizes.count + pendingSimulatorRuntimes.count
+        }
+
+        func ingestDevTool(_ tool: DevTool) {
+            pendingTools[tool.id] = tool
+        }
+
+        func ingestDevToolSize(
+            id: String,
+            pathSizeBytesByPath: [String: Int64],
+            sizeBytes: Int64,
+            lastModified: Date
+        ) {
+            pendingToolSizes[id] = DevToolSizeUpdate(
+                pathSizeBytesByPath: pathSizeBytesByPath,
+                sizeBytes: sizeBytes,
+                lastModified: lastModified
+            )
+        }
+
+        func ingestSimulator(_ simulator: SimulatorDevice) {
+            pendingSimulators[simulator.id] = simulator
+        }
+
+        func ingestSimulatorSize(id: UUID, sizeBytes: Int64) {
+            pendingSimulatorSizes[id] = sizeBytes
+        }
+
+        func ingestSimulatorRuntime(_ runtime: SimulatorRuntime) {
+            pendingSimulatorRuntimes[runtime.id] = runtime
+        }
+
+        func takeSnapshot() -> (
+            tools: [String: DevTool],
+            toolSizes: [String: DevToolSizeUpdate],
+            simulators: [UUID: SimulatorDevice],
+            simulatorSizes: [UUID: Int64],
+            simulatorRuntimes: [String: SimulatorRuntime]
+        ) {
+            let snapshot = (
+                pendingTools, pendingToolSizes, pendingSimulators, pendingSimulatorSizes, pendingSimulatorRuntimes
+            )
+            pendingTools.removeAll(keepingCapacity: true)
+            pendingToolSizes.removeAll(keepingCapacity: true)
+            pendingSimulators.removeAll(keepingCapacity: true)
+            pendingSimulatorSizes.removeAll(keepingCapacity: true)
+            pendingSimulatorRuntimes.removeAll(keepingCapacity: true)
+            return snapshot
+        }
+    }
+
+    private final class ProjectGroupCoalesceBuffers: ScanCoalesceBuffer {
+        var pendingGroups: [String: ProjectGroup] = [:]
+        var debounceTask: Task<Void, Never>?
+        var lastFlushAt: ContinuousClock.Instant?
+
+        var eventCount: Int { pendingGroups.count }
+
+        func ingest(_ group: ProjectGroup) {
+            pendingGroups[group.id] = group
+        }
+
+        func takeSnapshot() -> [ProjectGroup] {
+            let snapshot = Array(pendingGroups.values)
+            pendingGroups.removeAll(keepingCapacity: true)
+            return snapshot
+        }
+    }
+
+    /// Publishes buffered scan events on a steady cadence.
+    ///
+    /// This is a throttle, not a reset-debounce, and the distinction is the whole point.
+    /// The previous version cancelled and re-armed the timer on every event, so a scan
+    /// producing events faster than the interval never reached the deadline — the only
+    /// thing that ever fired was the event-count threshold. Flushes therefore landed in
+    /// irregular clumps (a burst of 100 events could publish in 20ms or in two seconds),
+    /// and the sidebar total lurched and stuttered between them instead of counting up.
+    ///
+    /// Anchoring the next deadline to the *previous flush* rather than to the latest
+    /// event keeps updates on a fixed beat whatever the event rate, which is what lets
+    /// the hero figure animate smoothly.
+    private func scheduleFlush<Buffer: ScanCoalesceBuffer>(
+        _ coalesce: Buffer,
+        generation: Int,
+        flush: @escaping (Buffer) -> Void
+    ) {
+        // Backstop: a very fast producer still yields to the UI every `flushThreshold`
+        // events rather than letting the buffer grow unbounded until the next tick.
+        if coalesce.eventCount >= ScanCoalesce.flushThreshold {
+            coalesce.debounceTask?.cancel()
+            coalesce.debounceTask = nil
+            coalesce.lastFlushAt = .now
+            flush(coalesce)
+            return
+        }
+
+        // A tick is already queued for this window — it will pick up everything
+        // buffered since. Re-arming here is exactly the bug described above.
+        guard coalesce.debounceTask == nil else { return }
+
+        let earliest = (coalesce.lastFlushAt ?? .now) + ScanCoalesce.flushInterval
+        let delay = max(.zero, ContinuousClock.Instant.now.duration(to: earliest))
+
+        coalesce.debounceTask = Task { @MainActor [weak self, weak coalesce] in
+            try? await Task.sleep(for: delay)
+            guard let self, let coalesce, !Task.isCancelled else { return }
+            coalesce.debounceTask = nil
+            guard self.scanGeneration == generation else { return }
+            coalesce.lastFlushAt = .now
+            flush(coalesce)
+        }
+    }
+
+    private func scheduleCacheScanFlush(coalesce: CacheScanCoalesceBuffers, generation: Int) {
+        scheduleFlush(coalesce, generation: generation) { [weak self] buffer in
+            self?.flushCacheScanBuffers(coalesce: buffer, animate: false)
+        }
+    }
+
+    private func flushCacheScanBuffers(coalesce: CacheScanCoalesceBuffers, animate: Bool) {
+        guard coalesce.eventCount > 0 else { return }
+        let snapshot = coalesce.takeSnapshot()
+        flushCacheScanBuffers(found: snapshot.found, sizes: snapshot.sizes, animate: animate)
+    }
+
+    private func flushCacheScanBuffers(
+        found: [CacheItem],
+        sizes: [String: (sizeBytes: Int64, lastModified: Date)],
+        animate: Bool
+    ) {
+        guard !found.isEmpty || !sizes.isEmpty else { return }
+
+        var items = stagedGeneralCacheItems
+        if !found.isEmpty {
+            items.append(contentsOf: found)
+            for item in found {
+                pendingCacheSizePaths.formUnion(
+                    item.locations.map { $0.path.standardizedFileURL.path }
+                )
+            }
+        }
+        if !sizes.isEmpty {
+            items = applyCacheSizeUpdates(items, updates: sizes)
+            for path in sizes.keys {
+                pendingCacheSizePaths.remove(path)
+            }
+        }
+
+        items = DefinitionCacheGrouper.group(items)
+        items = dedupeCacheItemsByPath(items)
+        items = DeletionSafetyPolicy.filterCacheItems(items)
+        stagedGeneralCacheItems = items
+
+        let published = publishedCacheItems(from: items)
+        if animate {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                cacheItems = published
+                reconcileCrossTabCacheDuplicates()
+            }
+        } else {
+            cacheItems = published
+            reconcileCrossTabCacheDuplicates()
+        }
+    }
+
+    /// Projects staged scan results into the published list. Rows surface only once
+    /// at least one location has a resolved non-zero size, so they never appear and
+    /// then vanish. A row's safety level (and any mid-scan user override or selection)
+    /// is pinned to what was already published, so rows never switch sections mid-scan.
+    private func publishedCacheItems(from staged: [CacheItem]) -> [CacheItem] {
+        let previousByID = Dictionary(cacheItems.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return staged.compactMap { item in
+            let sized = item.locations.filter { $0.sizeBytes > 0 }
+            guard !sized.isEmpty else { return nil }
+            var published = sized.count == item.locations.count ? item : item.withLocations(sized)
+            if let previous = previousByID[published.id] {
+                if previous.safetyInfo.level != published.safetyInfo.level {
+                    published.safetyInfo = previous.safetyInfo
+                    published.appName = previous.appName
+                }
+            }
+            // Hard safety net: only the two eligible risk tiers (safe / check
+            // first) may surface. Anything else — an unclassified folder, or a
+            // future allowlist/classification mistake — is dropped so it can
+            // never leak into the UI.
+            guard published.safetyInfo.level.canSurfaceInScanResults else {
+                #if DEBUG
+                for location in published.locations {
+                    print("[Purge] Dropped ineligible scan result (\(published.safetyInfo.level.rawValue)): \(location.path.path)")
+                }
+                #endif
+                return nil
+            }
+            return published
+        }
+    }
+
+    private func applyCacheSizeUpdates(
+        _ items: [CacheItem],
+        updates: [String: (sizeBytes: Int64, lastModified: Date)]
+    ) -> [CacheItem] {
+        guard !updates.isEmpty else { return items }
+
+        var updated: [CacheItem] = []
+        updated.reserveCapacity(items.count)
+
+        for item in items {
+            let hasMatch = item.locations.contains { location in
+                updates[location.path.standardizedFileURL.path] != nil
+            }
+            guard hasMatch else {
+                updated.append(item)
+                continue
+            }
+
+            let locations = item.locations.compactMap { location -> CacheLocation? in
+                let pathKey = location.path.standardizedFileURL.path
+                guard let update = updates[pathKey] else { return location }
+                guard update.sizeBytes > 0 else { return nil }
+                return CacheLocation(
+                    path: location.path,
+                    sizeBytes: update.sizeBytes,
+                    lastModified: update.lastModified,
+                    folderName: location.folderName
+                )
+            }
+            guard !locations.isEmpty else { continue }
+            updated.append(item.withLocations(locations))
+        }
+        return updated
+    }
+
+    private func scheduleDeveloperScanFlush(coalesce: DeveloperScanCoalesceBuffers, generation: Int) {
+        scheduleFlush(coalesce, generation: generation) { [weak self] buffer in
+            self?.flushDeveloperScanBuffers(coalesce: buffer, animate: false)
+        }
+    }
+
+    private func flushDeveloperScanBuffers(coalesce: DeveloperScanCoalesceBuffers, animate: Bool) {
+        guard coalesce.eventCount > 0 else { return }
+        let snapshot = coalesce.takeSnapshot()
+        flushDeveloperScanBuffers(
+            tools: snapshot.tools,
+            toolSizes: snapshot.toolSizes,
+            simulators: snapshot.simulators,
+            simulatorSizes: snapshot.simulatorSizes,
+            simulatorRuntimes: snapshot.simulatorRuntimes,
+            animate: animate
+        )
+    }
+
+    private func flushDeveloperScanBuffers(
+        tools: [String: DevTool],
+        toolSizes: [String: DevToolSizeUpdate],
+        simulators: [UUID: SimulatorDevice],
+        simulatorSizes: [UUID: Int64],
+        simulatorRuntimes: [String: SimulatorRuntime],
+        animate: Bool
+    ) {
+        guard !tools.isEmpty || !toolSizes.isEmpty || !simulators.isEmpty || !simulatorSizes.isEmpty
+            || !simulatorRuntimes.isEmpty else {
+            return
+        }
+
+        let apply = {
+            // Discovered tools are staged until their size resolves, so the visible
+            // list only ever gains rows during a scan and never loses them.
+            for tool in tools.values {
+                guard let offered = DeletionSafetyPolicy.devToolFilteredToOfferedCleanup(tool) else { continue }
+                self.pendingDevToolSizeIDs.insert(offered.id)
+                self.stagedDevToolsByID[offered.id] = offered
+            }
+
+            for (id, update) in toolSizes {
+                self.pendingDevToolSizeIDs.remove(id)
+                guard let tool = self.stagedDevToolsByID.removeValue(forKey: id)
+                        ?? self.devTools.first(where: { $0.id == id }) else { continue }
+                let updated = DevTool(
+                    definitionKey: tool.definitionKey,
+                    toolName: tool.toolName,
+                    paths: tool.paths,
+                    sizeBytes: update.sizeBytes,
+                    pathSizeBytesByPath: update.pathSizeBytesByPath,
+                    lastModified: update.lastModified,
+                    isSelected: false,
+                    isDetected: update.sizeBytes > 0,
+                    safetyInfo: tool.safetyInfo,
+                    reinstallSafety: tool.reinstallSafety
+                )
+                let existingIndex = self.devTools.firstIndex(where: { $0.id == id })
+                if let offered = DeletionSafetyPolicy.devToolFilteredToOfferedCleanup(updated), offered.isDetected {
+                    if let existingIndex {
+                        self.devTools[existingIndex] = offered
+                    } else {
+                        self.devTools.append(offered)
+                    }
+                } else if let existingIndex {
+                    self.devTools.remove(at: existingIndex)
+                    self.scanSelection.devToolIDs.remove(id)
+                }
+            }
+
+            if !tools.isEmpty || !toolSizes.isEmpty {
+                self.devTools.sort { $0.sizeBytes > $1.sizeBytes }
+            }
+
+            for simulator in simulators.values {
+                guard let offered = DeletionSafetyPolicy.simulatorFilteredToOfferedCleanup(simulator) else { continue }
+                self.stagedSimulatorsByID[offered.id] = offered
+            }
+
+            for (id, sizeBytes) in simulatorSizes {
+                if var staged = self.stagedSimulatorsByID.removeValue(forKey: id) {
+                    guard sizeBytes > 0 else { continue }
+                    staged.sizeOnDisk = sizeBytes
+                    if let index = self.simulatorDevices.firstIndex(where: { $0.id == id }) {
+                        self.simulatorDevices[index] = staged
+                    } else {
+                        self.simulatorDevices.append(staged)
+                    }
+                } else if let index = self.simulatorDevices.firstIndex(where: { $0.id == id }) {
+                    if sizeBytes > 0 {
+                        self.simulatorDevices[index].sizeOnDisk = sizeBytes
+                    } else {
+                        self.simulatorDevices.remove(at: index)
+                    }
+                }
+            }
+
+            if !simulators.isEmpty || !simulatorSizes.isEmpty {
+                self.simulatorDevices.sort { ($0.sizeOnDisk ?? 0) > ($1.sizeOnDisk ?? 0) }
+            }
+
+            for runtime in simulatorRuntimes.values {
+                guard runtime.safetyInfo.level.canSurfaceInScanResults, runtime.sizeBytes > 0 else { continue }
+                if let index = self.simulatorRuntimes.firstIndex(where: { $0.id == runtime.id }) {
+                    self.simulatorRuntimes[index] = runtime
+                } else {
+                    self.simulatorRuntimes.append(runtime)
+                }
+            }
+            if !simulatorRuntimes.isEmpty {
+                self.simulatorRuntimes.sort { $0.sizeBytes > $1.sizeBytes }
+            }
+
+            self.reconcileCrossTabCacheDuplicates()
+        }
+
+        if animate {
+            withAnimation(.easeInOut(duration: 0.2)) { apply() }
+        } else {
+            apply()
+        }
+    }
+
+    private func scheduleProjectGroupFlush(coalesce: ProjectGroupCoalesceBuffers, generation: Int) {
+        scheduleFlush(coalesce, generation: generation) { [weak self] buffer in
+            self?.flushProjectGroupBuffers(coalesce: buffer, animate: false)
+        }
+    }
+
+    private func flushProjectGroupBuffers(coalesce: ProjectGroupCoalesceBuffers, animate: Bool) {
+        guard coalesce.eventCount > 0 else { return }
+        let groups = coalesce.takeSnapshot()
+        flushProjectGroupBuffers(groups: groups, animate: animate)
+    }
+
+    private func flushProjectGroupBuffers(groups: [ProjectGroup], animate: Bool) {
+        guard !groups.isEmpty else { return }
+
+        let apply = {
+            for group in groups {
+                guard let offered = DeletionSafetyPolicy.projectGroupFilteredToOfferedCleanup(group) else { continue }
+                let paths = offered.artifacts.map { $0.path.standardizedFileURL.path }
+                self.pendingProjectArtifactPaths.formUnion(paths.filter { path in
+                    offered.artifacts.first { $0.path.standardizedFileURL.path == path }?.sizeBytes == 0
+                })
+                if let index = self.projectGroups.firstIndex(where: { $0.id == offered.id }) {
+                    self.projectGroups[index] = offered
+                } else {
+                    self.projectGroups.append(offered)
+                }
+            }
+            self.projectGroups.sort { $0.totalBytes > $1.totalBytes }
+        }
+
+        if animate {
+            withAnimation(.easeInOut(duration: 0.2)) { apply() }
+        } else {
+            apply()
+        }
+    }
+
+    /// Read once per row per render, so it must not touch the filesystem — the item
+    /// already carries its standardized paths.
+    func cacheItemHasPendingSize(_ item: CacheItem) -> Bool {
+        guard !pendingCacheSizePaths.isEmpty else { return false }
+        return item.standardizedPaths.contains { pendingCacheSizePaths.contains($0) }
+    }
+
+    func projectArtifactHasPendingSize(_ artifact: ProjectCacheArtifact) -> Bool {
+        pendingProjectArtifactPaths.contains(artifact.path.standardizedFileURL.path)
+    }
+
+    private func reconcileCrossTabCacheDuplicates() {
+        let devPaths = Set(
+            devTools
+                .filter(\.isDetected)
+                .flatMap(\.paths)
+                .map { $0.standardizedFileURL.path }
+        )
+        guard !devPaths.isEmpty else { return }
+
+        func pruned(_ items: [CacheItem]) -> [CacheItem] {
+            items.compactMap { item in
+                let remaining = item.locations.filter {
+                    !devPaths.contains($0.path.standardizedFileURL.path)
+                }
+                guard !remaining.isEmpty else { return nil }
+                guard remaining.count != item.locations.count else { return item }
+                return item.withLocations(remaining)
+            }
+        }
+
+        stagedGeneralCacheItems = pruned(stagedGeneralCacheItems)
+        cacheItems = pruned(cacheItems)
+    }
+
+    private func resolvedAutomaticSafety(for item: CacheItem) -> SafetyInfo {
+        if let key = item.definitionKey,
+           let record = ExplanationDatabase.record(forKey: key) {
+            return ExplanationDatabase.safetyInfo(from: record)
+        }
+        let primary = item.locations[0]
+        let fallback = appDisplayName(forBundleID: primary.folderName) ?? item.appName
+        return ExplanationResolver.initialSafetyForCacheFolder(
+            folderName: primary.folderName,
+            friendlyHeadline: fallback,
+            path: primary.path
+        )
+    }
+
+    private nonisolated static func worstReinstall(
+        _ a: ReinstallSafetyStatus,
+        _ b: ReinstallSafetyStatus
+    ) -> ReinstallSafetyStatus {
+        reinstallRank(a) >= reinstallRank(b) ? a : b
+    }
+
+    private nonisolated static func worstGit(_ a: GitWorktreeStatus, _ b: GitWorktreeStatus) -> GitWorktreeStatus {
+        gitRank(a) >= gitRank(b) ? a : b
+    }
+
+    private nonisolated static func reinstallRank(_ status: ReinstallSafetyStatus) -> Int {
+        switch status {
+        case .missingLockfile: return 2
+        case .reinstallable: return 1
+        case .notApplicable: return 0
+        }
+    }
+
+    private nonisolated static func gitRank(_ status: GitWorktreeStatus) -> Int {
+        switch status {
+        case .dirty: return 2
+        case .unknown: return 1
+        case .clean: return 0
+        }
+    }
+
+    /// `git status` can take seconds, and rows leave while it runs: a clean, an
+    /// exclusion, a new scan. So the answers are dropped if a newer scan than
+    /// `generation` has started, and otherwise go onto the rows listed when they
+    /// arrive, matched by path. A copy taken before the wait would bring removed
+    /// rows back (#172).
+    private func hydrateCacheSafetyMetadataParallel(generation: Int) async {
+        guard !cacheItems.isEmpty else { return }
+        isEnrichingGeneral = true
+        defer { isEnrichingGeneral = false }
+        // One `git status` per unique repository, same helper Dev Tools already uses.
+        // The previous one-task-per-row fan-out still serialized on the git actor and
+        // paid for a MainActor hop per location.
+        let urls = cacheItems.flatMap(\.paths)
+        let statusesByPath = await scanSources.gitStatuses(urls)
+        guard scanGeneration == generation, !Task.isCancelled else { return }
+
+        var updated = cacheItems
+        for index in updated.indices {
+            var reinstall = ReinstallSafetyStatus.notApplicable
+            var git = GitWorktreeStatus.clean
+            for location in updated[index].locations {
+                let url = location.path.standardizedFileURL
+                reinstall = Self.worstReinstall(reinstall, Self.cacheReinstallStatus(forPath: url))
+                // A path the check was not asked about has no answer, which is not clean.
+                git = Self.worstGit(git, statusesByPath[url.path] ?? .unknown)
+            }
+            updated[index].reinstallSafety = reinstall
+            updated[index].gitStatus = git
+        }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            cacheItems = updated
+        }
+    }
+
+    /// Same rules as the App Caches pass. Here a position taken before the wait
+    /// pointed past the end of the list once a project was excluded or cleaned,
+    /// and Purge crashed (#172).
+    private func hydrateDeveloperGitStatusesParallel(generation: Int) async {
+        let paths = projectGroups.flatMap { $0.artifacts.map(\.path) }
+        guard !paths.isEmpty else { return }
+        let statusesByPath = await scanSources.gitStatuses(paths)
+        guard scanGeneration == generation, !Task.isCancelled else { return }
+
+        var updated = projectGroups
+        for gIndex in updated.indices {
+            for aIndex in updated[gIndex].artifacts.indices {
+                let pathKey = updated[gIndex].artifacts[aIndex].path.standardizedFileURL.path
+                updated[gIndex].artifacts[aIndex].gitStatus = statusesByPath[pathKey] ?? .unknown
+            }
+        }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            projectGroups = updated
+        }
+    }
+
+    private func hydrateDeveloperToolRepoStatusesParallel(generation: Int) async {
+        let urls = devTools.flatMap(\.paths)
+        guard !urls.isEmpty else {
+            devToolRepoStatusByPath = [:]
+            return
+        }
+
+        let statusesByPath = await scanSources.gitStatuses(urls)
+        guard scanGeneration == generation, !Task.isCancelled else { return }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            devToolRepoStatusByPath = statusesByPath
+        }
+    }
+
+    private func devToolDeletionCandidate(_ tool: DevTool, path: URL) -> DeletionCandidate {
+        let key = path.standardizedFileURL.path
+        let pathBytes = tool.pathSizeBytesByPath[key] ?? (tool.paths.count == 1 ? tool.sizeBytes : 0)
+        return DeletionCandidate(
+            title: tool.safetyInfo.headline,
+            path: path,
+            sizeBytes: pathBytes,
+            safetyInfo: tool.safetyInfo,
+            reinstallCommand: tool.safetyInfo.reinstallCommand,
+            subtitle: OldToolVersionScanPolicy.deletionSubtitle(for: path) ?? path.lastPathComponent,
+            reinstallSafety: tool.reinstallSafety,
+            gitStatus: devToolRepoStatusByPath[key] ?? .unknown
+        )
+    }
+
+    private func simulatorDeletionCandidate(_ device: SimulatorDevice) -> DeletionCandidate {
+        let path = device.folderURL.standardizedFileURL
+        let bytes = device.sizeOnDisk ?? 0
+        return DeletionCandidate(
+            title: device.safetyInfo.headline,
+            path: path,
+            sizeBytes: bytes,
+            safetyInfo: device.safetyInfo,
+            reinstallCommand: nil,
+            subtitle: nil,
+            reinstallSafety: .notApplicable,
+            gitStatus: .clean
+        )
+    }
+
+    private func simulatorRuntimeDeletionCandidate(_ runtime: SimulatorRuntime) -> DeletionCandidate {
+        DeletionCandidate(
+            title: runtime.safetyInfo.headline,
+            path: runtime.locationURL.standardizedFileURL,
+            sizeBytes: runtime.sizeBytes,
+            safetyInfo: runtime.safetyInfo,
+            reinstallCommand: nil,
+            subtitle: String(localized: "Build \(runtime.build)"),
+            reinstallSafety: .notApplicable,
+            gitStatus: .clean,
+            simulatorRuntime: SimulatorRuntimeHandle(imageID: runtime.id, build: runtime.build)
+        )
+    }
+
+    private func selectedSimulatorRuntimeCandidates() -> [DeletionCandidate] {
+        simulatorRuntimes.filter { scanSelection.simulatorRuntimeIDs.contains($0.id) }
+            .map(simulatorRuntimeDeletionCandidate)
+    }
+
+    /// The engine's lookup from a runtime row's path to the identifier `simctl`
+    /// deletes by. Keyed the way the engine keys everything else.
+    private func simulatorRuntimeIDsByPath() -> [String: String] {
+        var ids: [String: String] = [:]
+        for runtime in simulatorRuntimes {
+            ids[runtime.locationURL.standardizedFileURL.path] = runtime.id
+        }
+        return ids
+    }
+
+    private func artifactDeletionCandidate(_ artifact: ProjectCacheArtifact) -> DeletionCandidate {
+        DeletionCandidate(
+            title: artifact.safetyInfo.headline,
+            path: artifact.path,
+            sizeBytes: artifact.sizeBytes,
+            safetyInfo: artifact.safetyInfo,
+            reinstallCommand: artifact.safetyInfo.reinstallCommand,
+            subtitle: artifact.projectRoot.lastPathComponent,
+            reinstallSafety: artifact.reinstallSafety,
+            gitStatus: artifact.gitStatus
+        )
+    }
+
+    private nonisolated static func cacheReinstallStatus(forPath url: URL) -> ReinstallSafetyStatus {
+        let name = url.lastPathComponent.lowercased()
+        if name == "deriveddata" { return .notApplicable }
+        return ReinstallSafetyEvaluator.evaluateByFolderNameDeleting(path: url)
+    }
+
+    /// Writes a finished clean to the History screen and to the yearly ledger. The
+    /// two share an id, so importing history into the ledger never counts it twice.
+    /// Retries and finished locked uninstalls skip History, as they always have,
+    /// but still belong in the year's totals.
+    private func recordCleanup(
+        _ report: DeletionReport,
+        trigger: CleanupTrigger,
+        source: CleanupSource,
+        addToHistory: Bool = true
+    ) {
+        let id = UUID()
+        if addToHistory {
+            CleanupHistoryStore.shared.append(id: id, trigger: trigger, report: report)
+        }
+        CleanupLedgerStore.shared.record(report, id: id, trigger: trigger, source: source)
+    }
+
+    private func incrementMovedToTrashTotal(by bytes: Int64) {
+        guard bytes > 0, bytes <= Self.maxReasonableSingleCleanBytes else { return }
+        let updated = min(totalMovedToTrashBytes + bytes, Self.maxStorableLifetimeMovedBytes)
+        totalMovedToTrashBytes = updated
+        defaults.set(totalMovedToTrashBytes, forKey: StorageKeys.totalMovedToTrashBytes)
+    }
+
+    // MARK: - Project row selection bindings
+
+    /// The single-row setters tick only rows on a live list, never one from the
+    /// last scan's saved file (#283), as the Select All setters do.
+    func setCacheSelected(id: String, isSelected: Bool) {
+        if isSelected {
+            guard cacheItems.contains(where: { $0.id == id }) else { return }
+            scanSelection.cacheIDs.insert(id)
+        } else {
+            scanSelection.cacheIDs.remove(id)
+        }
+    }
+
+    /// Only rows on the live list can be ticked, never one from the last scan's
+    /// saved file (#283).
+    func setAllCachesSelected(_ selected: Bool, ids: [String]) {
+        if selected {
+            let live = Set(cacheItems.map(\.id))
+            scanSelection.cacheIDs.formUnion(ids.filter(live.contains))
+        } else {
+            scanSelection.cacheIDs.subtract(ids)
+        }
+    }
+
+    func setDevToolSelected(id: String, isSelected: Bool) {
+        if isSelected {
+            guard devTools.contains(where: { $0.id == id }) else { return }
+            scanSelection.devToolIDs.insert(id)
+        } else {
+            scanSelection.devToolIDs.remove(id)
+        }
+    }
+
+    private func projectArtifactIndices(groupID: String, artifactID: String) -> (groupIndex: Int, artifactIndex: Int)? {
+        guard let groupIndex = projectGroups.firstIndex(where: { $0.id == groupID }),
+              let artifactIndex = projectGroups[groupIndex].artifacts.firstIndex(where: { $0.id == artifactID }) else {
+            return nil
+        }
+        return (groupIndex, artifactIndex)
+    }
+
+    func setProjectArtifactSelected(groupIndex: Int, artifactIndex: Int, isSelected: Bool) {
+        guard projectGroups.indices.contains(groupIndex),
+              projectGroups[groupIndex].artifacts.indices.contains(artifactIndex) else { return }
+        let id = projectGroups[groupIndex].artifacts[artifactIndex].id
+        if isSelected { scanSelection.artifactIDs.insert(id) } else { scanSelection.artifactIDs.remove(id) }
+    }
+
+    func setProjectArtifactSelected(groupID: String, artifactID: String, isSelected: Bool) {
+        guard let indices = projectArtifactIndices(groupID: groupID, artifactID: artifactID) else { return }
+        setProjectArtifactSelected(
+            groupIndex: indices.groupIndex,
+            artifactIndex: indices.artifactIndex,
+            isSelected: isSelected
+        )
+    }
+
+    func setSimulatorDeviceSelected(id: UUID, isSelected: Bool) {
+        if isSelected {
+            guard simulatorDevices.contains(where: { $0.id == id }) else { return }
+            scanSelection.simulatorIDs.insert(id)
+        } else {
+            scanSelection.simulatorIDs.remove(id)
+        }
+    }
+
+    func setSimulatorRuntimeSelected(id: String, isSelected: Bool) {
+        if isSelected {
+            guard simulatorRuntimes.contains(where: { $0.id == id }) else { return }
+            scanSelection.simulatorRuntimeIDs.insert(id)
+        } else {
+            scanSelection.simulatorRuntimeIDs.remove(id)
+        }
+    }
+
+    // MARK: - Categorization (per-row reset, exclusions)
+
+    private func refreshUserOverridePaths() {
+        userOverridePaths = UserOverridesStore.allOverriddenPaths()
+    }
+
+    /// Reads both exclusion lists again, and publishes only when one changed.
+    private func refreshExclusionListsIfChanged() {
+        guard ExcludedPathsStore.allExcludedPaths() != excludedPaths
+            || ExcludedSimulatorRuntimesStore.allEntries() != excludedSimulatorRuntimes else { return }
+        refreshExcludedPaths()
+    }
+
+    func refreshExcludedPaths() {
+        excludedPaths = ExcludedPathsStore.allExcludedPaths()
+        excludedSimulatorRuntimes = ExcludedSimulatorRuntimesStore.allEntries()
+        exclusionRevision &+= 1
+    }
+
+    /// Saves one exclusion. It holds for this run either way; when the list could
+    /// not be written, the user hears that it lasts only until Purge quits (#185).
+    private func writeExclusion(path: URL, displayName: String) {
+        guard !ExcludedPathsStore.write(path: path, displayName: displayName) else { return }
+        errorMessage = String(localized: "Purge couldn't save your exclusions. This change lasts until Purge quits.")
+    }
+
+    /// Subtracts every location from future scans and drops the row. Only removes paths
+    /// the allowlist already approved.
+    func excludeFromScans(_ item: CacheItem) {
+        for url in item.paths {
+            writeExclusion(path: url, displayName: item.appName)
+        }
+        refreshExcludedPaths()
+
+        let itemID = item.id
+        let excluded = Set(item.paths.map { $0.standardizedFileURL.path })
+
+        // A mid-scan flush republishes `cacheItems` from the staged buffer, so the row
+        // has to leave the buffer too or the next flush brings it straight back. Match on
+        // path as well as id: a staged twin can carry not-yet-sized locations that the
+        // published row dropped, which shifts its path-derived id.
+        stagedGeneralCacheItems = stagedGeneralCacheItems.compactMap { staged in
+            guard staged.id != itemID else { return nil }
+            let remaining = staged.locations.filter {
+                !excluded.contains($0.path.standardizedFileURL.path)
+            }
+            guard !remaining.isEmpty else { return nil }
+            guard remaining.count != staged.locations.count else { return staged }
+            return staged.withLocations(remaining)
+        }
+        pendingCacheSizePaths.subtract(excluded)
+
+        scanSelection.cacheIDs.remove(itemID)
+        withAnimation {
+            cacheItems.removeAll { $0.id == itemID }
+        }
+    }
+
+    /// Subtracts every path backing a dev tool row and drops it. Only removes paths the
+    /// allowlist already approved.
+    func excludeFromScans(_ tool: DevTool) {
+        for url in tool.paths {
+            writeExclusion(path: url, displayName: tool.toolName)
+        }
+        refreshExcludedPaths()
+
+        let toolID = tool.id
+        // A pending size update re-adds a staged tool to `devTools` when it lands, so drop
+        // the staged copy and stop waiting on its size.
+        stagedDevToolsByID.removeValue(forKey: toolID)
+        pendingDevToolSizeIDs.remove(toolID)
+
+        scanSelection.devToolIDs.remove(toolID)
+        withAnimation {
+            devTools.removeAll { $0.id == toolID }
+        }
+    }
+
+    /// Subtracts a simulator device folder and drops it. Only removes paths the allowlist
+    /// already approved.
+    func excludeFromScans(_ device: SimulatorDevice) {
+        writeExclusion(
+            path: device.folderURL,
+            displayName: "\(device.deviceName) — \(device.runtimeVersion)"
+        )
+        refreshExcludedPaths()
+
+        let deviceID = device.id
+        // Same as dev tools: a staged simulator is re-appended once its size resolves.
+        stagedSimulatorsByID.removeValue(forKey: deviceID)
+
+        scanSelection.simulatorIDs.remove(deviceID)
+        withAnimation {
+            simulatorDevices.removeAll { $0.id == deviceID }
+        }
+    }
+
+    /// Saved by image identifier and build, not path: the path changes when macOS
+    /// mounts or unmounts the image, which brought the runtime back (#178).
+    func excludeFromScans(_ runtime: SimulatorRuntime) {
+        if !ExcludedSimulatorRuntimesStore.write(runtime) {
+            errorMessage = String(localized: "Purge couldn't save your exclusions. This change lasts until Purge quits.")
+        }
+        refreshExcludedPaths()
+
+        let runtimeID = runtime.id
+        scanSelection.simulatorRuntimeIDs.remove(runtimeID)
+        withAnimation {
+            simulatorRuntimes.removeAll { $0.id == runtimeID }
+        }
+    }
+
+    /// Subtracts one artifact folder; the group vanishes once empty. Only removes paths
+    /// the allowlist already approved.
+    func excludeProjectArtifactFromScans(groupID: String, artifactID: String) {
+        guard let indices = projectArtifactIndices(groupID: groupID, artifactID: artifactID) else { return }
+        let group = projectGroups[indices.groupIndex]
+        let artifact = group.artifacts[indices.artifactIndex]
+        writeExclusion(
+            path: artifact.path,
+            displayName: "\(group.displayName) — \(artifact.kind.rowTag)"
+        )
+        refreshExcludedPaths()
+
+        scanSelection.artifactIDs.remove(artifactID)
+        withAnimation {
+            var groups = projectGroups
+            groups[indices.groupIndex].artifacts.removeAll { $0.id == artifactID }
+            projectGroups = groups.filter { !$0.artifacts.isEmpty }
+        }
+    }
+
+    /// Subtracts a project root; descendant paths stay excluded via `isExcluded`. Only
+    /// removes paths the allowlist already approved.
+    func excludeProjectGroupFromScans(groupID: String) {
+        guard let group = projectGroups.first(where: { $0.id == groupID }) else { return }
+        writeExclusion(path: group.rootPath, displayName: group.displayName)
+        refreshExcludedPaths()
+
+        scanSelection.artifactIDs.subtract(group.artifacts.map(\.id))
+        withAnimation {
+            projectGroups.removeAll { $0.id == groupID }
+        }
+    }
+
+    /// Drop an exclusion. The item reappears on the next scan, but only if it still
+    /// passes the normal allowlist gate.
+    func removeExclusion(path: URL) {
+        if !ExcludedPathsStore.remove(path: path) {
+            errorMessage = String(localized: "Purge couldn't save your exclusions. This change lasts until Purge quits.")
+        }
+        refreshExcludedPaths()
+    }
+
+    /// Drop a runtime exclusion. The runtime reappears on the next scan if `simctl`
+    /// still lists it as deletable.
+    func removeSimulatorRuntimeExclusion(imageID: String) {
+        if !ExcludedSimulatorRuntimesStore.remove(imageID: imageID) {
+            errorMessage = String(localized: "Purge couldn't save your exclusions. This change lasts until Purge quits.")
+        }
+        refreshExcludedPaths()
+    }
+
+    /// Subtracts one Large Files row from future scans and drops it. For an AI model
+    /// that is its manifest, the path the model is discovered through.
+    func excludeLargeFileFromScans(_ file: LargeFile) {
+        writeExclusion(path: file.path, displayName: file.displayName)
+        refreshExcludedPaths()
+        pruneExcludedResults()
+    }
+
+    /// Subtracts the folder holding a Large Files row, so nothing inside it is walked
+    /// or listed again (#46).
+    func excludeLargeFileFolderFromScans(_ file: LargeFile) {
+        excludeFoldersFromScans([file.path.deletingLastPathComponent()])
+    }
+
+    /// Folders the user picked in Settings. Exclusions only ever subtract, so any
+    /// folder is safe to add. One already covered by an existing exclusion is skipped
+    /// rather than listed twice.
+    func excludeFoldersFromScans(_ folders: [URL]) {
+        var added = false
+        for folder in folders where !ExcludedPathsStore.isExcluded(folder) {
+            writeExclusion(
+                path: folder,
+                displayName: FileManager.default.displayName(atPath: folder.path)
+            )
+            added = true
+        }
+        guard added else { return }
+        refreshExcludedPaths()
+        pruneExcludedResults()
+    }
+
+    /// Drops rows in every tab that the exclusion list now covers, with their
+    /// selection, so nothing excluded stays on screen ready to clean. The manual,
+    /// Large Files and scheduled delete paths re-check the store as well, so this
+    /// keeps the screen honest rather than being the only guard. Runs once per user action, so the
+    /// store's symlink-resolving check is affordable here.
+    private func pruneExcludedResults() {
+        let isExcluded: (URL) -> Bool = { ExcludedPathsStore.isExcluded($0) }
+        removeScanRows(where: isExcluded)
+        // A staged row is re-published once its size lands, so it has to go too.
+        stagedDevToolsByID = stagedDevToolsByID.filter { _, tool in !tool.paths.allSatisfy(isExcluded) }
+        stagedSimulatorsByID = stagedSimulatorsByID.filter { _, device in !isExcluded(device.folderURL) }
+        pendingCacheSizePaths = pendingCacheSizePaths.filter { !isExcluded(URL(fileURLWithPath: $0)) }
+        scanSelection.cacheIDs.formIntersection(cacheItems.map(\.id))
+        scanSelection.artifactIDs.formIntersection(projectGroups.flatMap(\.artifacts).map(\.id))
+        scanSelection.simulatorIDs.formIntersection(simulatorDevices.map(\.id))
+        pruneExcludedLargeFiles()
+    }
+
+    /// Drops Large Files rows the exclusion list now covers, along with their
+    /// selection and duplicate badges.
+    private func pruneExcludedLargeFiles() {
+        let removedIDs = Set(largeFiles.filter { ExcludedPathsStore.isExcluded($0.path) }.map(\.id))
+        guard !removedIDs.isEmpty else { return }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            largeFiles.removeAll { removedIDs.contains($0.id) }
+        }
+        largeFileSelection.ids.subtract(removedIDs)
+        // A pair that just lost a member is no longer a duplicate.
+        largeFileDuplicates.removeFiles(ids: removedIDs)
+    }
+
+    /// Remove a single override and re-resolve the row using the automatic chain.
+    func resetCacheItemToAutomatic(id: String) {
+        guard let index = cacheItems.firstIndex(where: { $0.id == id }) else { return }
+        let item = cacheItems[index]
+        for location in item.locations {
+            UserOverridesStore.remove(path: location.path)
+        }
+        refreshUserOverridePaths()
+
+        let resolved = resolvedAutomaticSafety(for: item)
+        withAnimation {
+            cacheItems[index].safetyInfo = resolved
+            cacheItems[index].appName = resolved.headline
+        }
+    }
+
+    func resetDevToolToAutomatic(id: String) {
+        guard let index = devTools.firstIndex(where: { $0.id == id }) else { return }
+        let tool = devTools[index]
+        guard let primary = tool.primaryOverridePath else { return }
+        UserOverridesStore.remove(path: primary)
+        refreshUserOverridePaths()
+
+        let label = tool.toolName
+        let info = DevScanner.automaticSafetyInfo(
+            forDevToolLabel: label,
+            primaryPath: primary
+        )
+        withAnimation {
+            devTools[index].safetyInfo = info
+        }
+    }
+
+    func resetProjectArtifactToAutomatic(groupID: String, artifactID: String) {
+        guard let indices = projectArtifactIndices(groupID: groupID, artifactID: artifactID) else { return }
+        resetProjectArtifactToAutomatic(groupIndex: indices.groupIndex, artifactIndex: indices.artifactIndex)
+    }
+
+    func resetProjectArtifactToAutomatic(groupIndex: Int, artifactIndex: Int) {
+        guard projectGroups.indices.contains(groupIndex),
+              projectGroups[groupIndex].artifacts.indices.contains(artifactIndex) else { return }
+        let artifact = projectGroups[groupIndex].artifacts[artifactIndex]
+        UserOverridesStore.remove(path: artifact.path)
+        refreshUserOverridePaths()
+
+        let info = SafetyInfo.forStaleProjectArtifact(
+            kind: artifact.kind,
+            path: artifact.path,
+            reinstallCommand: artifact.safetyInfo.reinstallCommand,
+            checkFirstReason: artifact.checkFirstReason
+        )
+        var groups = projectGroups
+        groups[groupIndex].artifacts[artifactIndex].safetyInfo = info
+        withAnimation {
+            projectGroups = groups
+        }
+    }
+
+}
+
+/// Where `measureBundlesAndRemovableTotals` has got to. Main-actor state shared
+/// by its bundle pass and its leftover scans.
+@MainActor
+private final class AppTotalsProgress {
+    /// `du` bundle sizes so far, by standardized bundle path.
+    var bundleBytes: [String: Int64] = [:]
+    /// The bundle pass has ended; a bundle with no size by then has none.
+    var bundlesDone = false
+    /// Leftover scans that have finished but are not counted yet, by app index.
+    var leftovers: [Int: [UninstallItem]] = [:]
+    /// The next app, in list order, to be counted.
+    var nextToCount = 0
+    /// A path is counted once across the whole pass. Two installs that share a
+    /// bundle id resolve to the same bundle-id-keyed leftovers; without this the
+    /// shared bytes would land in both tiles and double the summed figure on the
+    /// Uninstall button (`selectedAppsRemovableBytes`).
+    var countedPaths = Set<String>()
+    private var nextToScan = 0
+
+    func takeNextApp(count: Int) -> Int? {
+        guard nextToScan < count else { return nil }
+        defer { nextToScan += 1 }
+        return nextToScan
+    }
+}

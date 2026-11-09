@@ -1,0 +1,217 @@
+import Foundation
+import Testing
+@testable import Purge
+
+/// Finder's "Uninstall with Purge" and a Dock drop both go through
+/// `ExternalUninstallRequest`. These check which selections open the
+/// uninstaller and which get turned down, against fake app folders.
+@Suite("Uninstall requests from Finder and the Dock")
+struct ExternalUninstallRequestTests {
+
+    /// Two fake roots standing in for /Applications and ~/Applications. Only
+    /// paths matter here: `readInfo` is faked, so nothing is read from disk.
+    private let applications = URL(fileURLWithPath: "/tmp/purge-tests/Applications", isDirectory: true)
+    private let homeApplications = URL(fileURLWithPath: "/tmp/purge-tests/home/Applications", isDirectory: true)
+    private var roots: [URL] { [applications, homeApplications] }
+
+    private func info(name: String? = nil, bundleID: String? = nil) -> [String: Any] {
+        var info: [String: Any] = [:]
+        if let name { info["CFBundleName"] = name }
+        if let bundleID { info["CFBundleIdentifier"] = bundleID }
+        return info
+    }
+
+    private func resolve(_ urls: [URL], info: [String: Any] = [:]) -> ExternalUninstallRequest.Outcome {
+        ExternalUninstallRequest.resolve(
+            urls: urls,
+            roots: roots,
+            purgeBundleIDs: ["io.getpurge.app"],
+            readInfo: { _ in info }
+        )
+    }
+
+    @Test("An app in Applications opens the uninstaller on its bundle path")
+    func appInApplications() {
+        let app = applications.appendingPathComponent("Rectangle.app")
+        let outcome = resolve([app], info: info(name: "Rectangle", bundleID: "com.knollsoft.Rectangle"))
+        #expect(outcome == .uninstall(appID: app.standardizedFileURL.path, name: "Rectangle"))
+    }
+
+    @Test("Finder's trailing slash does not change the app id")
+    func trailingSlashMatchesInstalledAppID() {
+        let app = URL(fileURLWithPath: applications.path + "/Rectangle.app/", isDirectory: true)
+        let outcome = resolve([app], info: info(name: "Rectangle"))
+        #expect(outcome == .uninstall(appID: applications.path + "/Rectangle.app", name: "Rectangle"))
+    }
+
+    @Test("One folder down is listed, as the uninstaller walks it")
+    func appOneFolderDown() {
+        let app = applications.appendingPathComponent("Utilities/Thing.app")
+        #expect(resolve([app], info: info(name: "Thing")) == .uninstall(appID: app.path, name: "Thing"))
+    }
+
+    @Test("The home Applications folder counts too")
+    func appInHomeApplications() {
+        let app = homeApplications.appendingPathComponent("Thing.app")
+        #expect(resolve([app], info: info(name: "Thing")) == .uninstall(appID: app.path, name: "Thing"))
+    }
+
+    /// Autodesk's layout (#143): a vendor folder, then a product folder.
+    @Test("Two folders down is listed, as the uninstaller walks it")
+    func appTwoFoldersDown() {
+        let app = applications.appendingPathComponent("Autodesk/AutoCAD 2026/AutoCAD 2026.app")
+        let outcome = resolve([app], info: info(name: "AutoCAD 2026"))
+        #expect(outcome == .uninstall(appID: app.path, name: "AutoCAD 2026"))
+    }
+
+    @Test("Any depth is listed, as the uninstaller walks it")
+    func appThreeFoldersDown() {
+        let app = applications.appendingPathComponent("Utilities/Adobe Sync/CoreSync/Core Sync.app")
+        #expect(resolve([app], info: info(name: "Core Sync")) == .uninstall(appID: app.path, name: "Core Sync"))
+    }
+
+    /// Background apps are listed like any other, so a request for one opens
+    /// the review the list would.
+    @Test("A background app deep in a vendor folder is listed")
+    func backgroundAppDeepDown() {
+        let app = applications.appendingPathComponent("Vendor/Suite/Helper.app")
+        var helper = info(name: "Helper")
+        helper["LSUIElement"] = true
+        #expect(resolve([app], info: helper) == .uninstall(appID: app.path, name: "Helper"))
+    }
+
+    @Test("An app inside another app's bundle is turned down")
+    func appInsideAnotherBundle() {
+        let app = applications.appendingPathComponent("Host.app/Contents/Inner.app")
+        #expect(resolve([app], info: info(name: "Inner")) == .insideAnotherApp(name: "Inner"))
+    }
+
+    @Test("An app on the Desktop is turned down by name")
+    func appOutsideApplications() {
+        let app = URL(fileURLWithPath: "/tmp/purge-tests/Desktop/Thing.app")
+        #expect(resolve([app], info: info(name: "Thing")) == .outsideApplications(name: "Thing", folder: "/tmp/purge-tests/Desktop"))
+    }
+
+    @Test("The refusal for an app outside the folders names the folder it can add (#99)")
+    func refusalNamesTheFolderToAdd() throws {
+        let outcome = ExternalUninstallRequest.Outcome.outsideApplications(name: "Luminar Neo", folder: "/Volumes/SSD/Photo Apps")
+        let refusal = try #require(outcome.refusal)
+        #expect(refusal.detail.contains("\u{201C}Photo Apps\u{201D}"))
+        #expect(refusal.detail.contains("Luminar Neo"))
+    }
+
+    @Test("Add Folder is offered only for a folder Purge would take (#99)")
+    func addFolderOfferedOnlyWhenAllowed() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("purge-offer-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let home = base.appendingPathComponent("home", isDirectory: true)
+        let volumes = base.appendingPathComponent("Volumes", isDirectory: true)
+        let tools = volumes.appendingPathComponent("SSD/Tools", isDirectory: true)
+        try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+
+        try withTemporaryHandoffRoot {
+            AppFolders.$volumes.withValue(volumes) {
+                #expect(ExternalUninstallRequest.canOfferToAdd(folder: tools.path, home: home))
+                // The top of a drive, and the home folder, are never added.
+                #expect(!ExternalUninstallRequest.canOfferToAdd(folder: tools.deletingLastPathComponent().path, home: home))
+                #expect(!ExternalUninstallRequest.canOfferToAdd(folder: home.path, home: home))
+            }
+        }
+
+        let outcome = ExternalUninstallRequest.Outcome.outsideApplications(name: "Top Probe", folder: "/Volumes/SSD")
+        let refusal = try #require(outcome.refusalWithoutAddingFolder)
+        #expect(!refusal.detail.contains("\u{201C}SSD\u{201D}"))
+        #expect(refusal.detail.contains("Top Probe"))
+    }
+
+    @Test("The name falls back to the bundle's file name without an Info.plist")
+    func nameFallsBackToFileName() {
+        let app = URL(fileURLWithPath: "/tmp/purge-tests/Desktop/Thing.app")
+        #expect(resolve([app]) == .outsideApplications(name: "Thing", folder: "/tmp/purge-tests/Desktop"))
+    }
+
+    @Test("The display name wins over the bundle name")
+    func displayNameWins() {
+        let app = applications.appendingPathComponent("Thing.app")
+        var info = info(name: "Thing")
+        info["CFBundleDisplayName"] = "Thing Pro"
+        #expect(resolve([app], info: info) == .uninstall(appID: app.path, name: "Thing Pro"))
+    }
+
+    @Test("Apple's apps under /System are never offered")
+    func appleAppIsProtected() {
+        let app = URL(fileURLWithPath: "/System/Applications/Safari.app")
+        #expect(resolve([app], info: info(name: "Safari", bundleID: "com.apple.Safari")) == .appleApp(name: "Safari"))
+    }
+
+    @Test("A symlink from Applications into /System is still Apple's app")
+    func symlinkedAppleAppIsProtected() throws {
+        // Like /Applications/Safari.app, which points into the system cryptex.
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("purge-tests-symlink-\(UUID().uuidString)", isDirectory: true)
+        let root = folder.appendingPathComponent("Applications", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let link = root.appendingPathComponent("Safari.app")
+        try FileManager.default.createSymbolicLink(
+            at: link,
+            withDestinationURL: URL(fileURLWithPath: "/System/Cryptexes/App/System/Applications/Safari.app")
+        )
+
+        let outcome = ExternalUninstallRequest.resolve(
+            urls: [link],
+            roots: [root],
+            purgeBundleIDs: [],
+            readInfo: { _ in info(name: "Safari", bundleID: "com.apple.Safari") }
+        )
+        #expect(outcome == .appleApp(name: "Safari"))
+    }
+
+    @Test("Purge turns itself down even from inside Applications")
+    func purgeItself() {
+        let app = applications.appendingPathComponent("Purge.app")
+        #expect(resolve([app], info: info(name: "Purge", bundleID: "io.getpurge.app")) == .purgeItself)
+    }
+
+    @Test("A selection with no app bundle is turned down")
+    func noApp() {
+        let file = applications.appendingPathComponent("notes.txt")
+        #expect(resolve([file]) == .noApp)
+        #expect(resolve([]) == .noApp)
+    }
+
+    @Test("A stray file next to the app is ignored")
+    func strayFileIsIgnored() {
+        let app = applications.appendingPathComponent("Thing.app")
+        let file = applications.appendingPathComponent("notes.txt")
+        #expect(resolve([file, app], info: info(name: "Thing")) == .uninstall(appID: app.path, name: "Thing"))
+    }
+
+    @Test("Several apps are turned down with the count")
+    func severalApps() {
+        let apps = ["A", "B", "C"].map { applications.appendingPathComponent("\($0).app") }
+        #expect(resolve(apps) == .severalApps(count: 3))
+    }
+
+    @Test("Every refusal has an alert; the uninstall outcome has none")
+    func refusals() {
+        let outcomes: [ExternalUninstallRequest.Outcome] = [
+            .noApp, .severalApps(count: 2), .outsideApplications(name: "X", folder: "/tmp/X"), .insideAnotherApp(name: "X"), .appleApp(name: "X"), .purgeItself,
+        ]
+        for outcome in outcomes {
+            #expect(outcome.refusal != nil)
+            #expect(outcome.refusal?.title.isEmpty == false)
+            #expect(outcome.refusal?.detail.isEmpty == false)
+        }
+        #expect(ExternalUninstallRequest.Outcome.uninstall(appID: "/a", name: "A").refusal == nil)
+    }
+
+    @Test("The Services menu is refreshed once per build")
+    func servicesRefreshOncePerBuild() {
+        #expect(ServicesMenuRegistration.shouldRefresh(recorded: nil, current: "1.8.3 (31)"))
+        #expect(ServicesMenuRegistration.shouldRefresh(recorded: "1.8.2 (30)", current: "1.8.3 (31)"))
+        #expect(!ServicesMenuRegistration.shouldRefresh(recorded: "1.8.3 (31)", current: "1.8.3 (31)"))
+    }
+}

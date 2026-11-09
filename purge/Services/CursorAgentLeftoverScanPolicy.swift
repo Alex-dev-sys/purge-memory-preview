@@ -1,0 +1,322 @@
+import AppKit
+import Darwin
+import Foundation
+
+/// Cursor leftover agent folders (issue #60): junk per-cwd namespaces under
+/// `~/.cursor/projects/` left by temp directories (`var-folders-*`, `tmp-*`)
+/// and abandoned empty windows (numeric backup ids). Cursor's parallel-agent
+/// checkouts under `~/.cursor/worktrees` are `AgentWorktreeScanPolicy`'s, with
+/// every other tool's.
+///
+/// Age is never a gate. A folder from this morning can already be junk; one
+/// from months ago can still be a live window. Live work is detected from open
+/// Cursor windows, process working directories, and whether a temp workspace
+/// still exists. Settings, login, MCP config, extensions,
+/// and real project namespaces are never offered. Chat history for a living
+/// workspace is out of scope.
+enum CursorAgentLeftoverScanPolicy {
+
+    static let toolLabel = "Cursor Agent Leftovers"
+    static let explanationKey = "cursor-agent-leftover"
+    static let cursorBundleID = "com.todesktop.230313mzl4w4u92"
+
+    nonisolated enum SnapshotStatus: Equatable {
+        case available
+        case unavailable
+    }
+
+    /// Snapshot of "is this folder still in use" signals. Production fills it
+    /// from the running system; tests pass a fixture.
+    nonisolated struct LiveContext: Equatable {
+        var cursorIsRunning: Bool
+        var openWorkspacePaths: Set<String>
+        var emptyWindowBackupIDs: Set<String>
+        var processWorkingDirectories: Set<String>
+        /// Whether Cursor-related process cwd inspection finished. An empty
+        /// cwd set is not evidence of success.
+        var cursorProcessSnapshot: SnapshotStatus
+        /// Whether `storage.json` was present and parsed. Missing or invalid
+        /// data is unavailable, not "no windows".
+        var windowsSnapshot: SnapshotStatus
+        /// `$TMPDIR`, where a `var-folders-…` namespace's workspace lives.
+        var temporaryDirectory: URL
+        /// `/private/tmp`, where a `tmp-…` or `private-tmp-…` namespace's
+        /// workspace lives. Those were looked for in `$TMPDIR`, found missing,
+        /// and listed while the workspace was in use (#183).
+        var systemTemporaryDirectory = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+
+        nonisolated static func current(
+            home: URL = FileManager.default.homeDirectoryForCurrentUser
+        ) -> LiveContext {
+            let cursorSupport = home
+                .appendingPathComponent("Library/Application Support/Cursor", isDirectory: true)
+            let windows = readOpenWindows(from: cursorSupport)
+            let processes = CursorProcessWorkingDirectories.snapshot()
+            return LiveContext(
+                cursorIsRunning: isCursorRunning(),
+                openWorkspacePaths: windows.folders,
+                emptyWindowBackupIDs: windows.emptyWindowIDs,
+                processWorkingDirectories: processes.directories,
+                cursorProcessSnapshot: processes.status,
+                windowsSnapshot: windows.status,
+                temporaryDirectory: FileManager.default.temporaryDirectory.standardizedFileURL
+            )
+        }
+    }
+
+    // MARK: - Deletion gate (path shape only)
+
+    /// Whether Purge may trash this path. Unused-ness is a scan filter, not a
+    /// delete-time check — once the user has picked a listed folder, the gate
+    /// only proves it is a leftover *kind*, never `~/.cursor` itself.
+    nonisolated static func isWhitelistedPath(_ path: String, home: String) -> Bool {
+        let url = URL(fileURLWithPath: path, isDirectory: true)
+        guard !PathContainment.containsSymlinkComponent(url, home: home) else { return false }
+        guard staysInsideIntendedCursorRoot(url, home: home) else { return false }
+
+        let projectsRoot = "\(home)/.cursor/projects/"
+        if path.hasPrefix(projectsRoot) {
+            let relative = String(path.dropFirst(projectsRoot.count))
+            guard !relative.isEmpty, !relative.contains("/") else { return false }
+            guard isJunkProjectSlug(relative) else { return false }
+            if isNumericProjectSlug(relative),
+               numericNamespacesBlockedByUnavailableWindows(home: home) {
+                return false
+            }
+            return true
+        }
+
+        return false
+    }
+
+    nonisolated static func isJunkProjectSlug(_ name: String) -> Bool {
+        if name.hasPrefix(".") { return false }
+        if name.hasPrefix("var-folders-") { return true }
+        if name.hasPrefix("tmp-") || name.hasPrefix("private-tmp-") {
+            return uuidSuffix(in: name) != nil
+        }
+        return isNumericProjectSlug(name)
+    }
+
+    nonisolated static func isNumericProjectSlug(_ name: String) -> Bool {
+        name.count >= 10 && name.unicodeScalars.allSatisfy { CharacterSet.decimalDigits.contains($0) }
+    }
+
+    /// Dev Tools trash leftover folders through `deleteItems`, not the
+    /// privileged uninstall helper. Call this immediately before `trashItem`.
+    nonisolated static func looksLikeCursorLeftoverPath(_ url: URL, home: URL) -> Bool {
+        let path = url.standardizedFileURL.path
+        let homePath = home.standardizedFileURL.path
+        return path.hasPrefix("\(homePath)/.cursor/projects/")
+    }
+
+    nonisolated static func passesImmediateTrashBoundary(
+        _ url: URL,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> Bool {
+        isWhitelistedPath(url.standardizedFileURL.path, home: home.standardizedFileURL.path)
+    }
+
+    // MARK: - Discovery
+
+    /// Junk namespaces that exist on disk and look unused.
+    nonisolated static func unusedJunkProjectNamespaces(
+        home: URL,
+        live: LiveContext,
+        fileManager: FileManager = .default
+    ) -> [URL] {
+        // Without Cursor's working directories, a namespace an agent is working
+        // in looks unused. The snapshot's status was never read, so a failed one
+        // counted as no agent running anywhere (#183).
+        guard live.cursorProcessSnapshot == .available else { return [] }
+        let root = home.appendingPathComponent(".cursor/projects", isDirectory: true)
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        return entries.compactMap { entry in
+            let url = entry.standardizedFileURL
+            guard (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
+                return nil
+            }
+            let slug = url.lastPathComponent
+            guard isJunkProjectSlug(slug) else { return nil }
+            if isNumericProjectSlug(slug),
+               live.cursorIsRunning && live.windowsSnapshot != .available {
+                return nil
+            }
+            guard !isLiveJunkProject(slug: slug, live: live, fileManager: fileManager) else { return nil }
+            return url
+        }
+    }
+
+    // MARK: - Live detection
+
+    nonisolated static func isLiveJunkProject(
+        slug: String,
+        live: LiveContext,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        if live.emptyWindowBackupIDs.contains(slug) {
+            return true
+        }
+        if live.openWorkspacePaths.contains(where: { encodedProjectSlug(for: $0) == slug }) {
+            return true
+        }
+        if let temp = resolvedTemporaryWorkspace(slug: slug, live: live),
+           fileManager.fileExists(atPath: temp.path) {
+            return true
+        }
+        if live.processWorkingDirectories.contains(where: { encodedProjectSlug(for: $0) == slug }) {
+            return true
+        }
+        return false
+    }
+
+    /// Cursor encodes a cwd as `~/.cursor/projects/<slug>` by stripping the
+    /// leading slash and replacing `/` and `_` with `-`.
+    nonisolated static func encodedProjectSlug(for absolutePath: String) -> String {
+        var path = absolutePath
+        if path.hasPrefix("/") {
+            path.removeFirst()
+        }
+        return path.replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: "_", with: "-")
+    }
+
+    /// The temp workspace a junk slug was made for: `var-folders-…-T-<uuid>`
+    /// is `$TMPDIR/<uuid>`, and `tmp-<uuid>` and `private-tmp-<uuid>` are
+    /// `/private/tmp/<uuid>`. Other junk slugs have no source path.
+    nonisolated static func resolvedTemporaryWorkspace(slug: String, live: LiveContext) -> URL? {
+        let uuid = uuidSuffix(in: slug)
+        guard let uuid else { return nil }
+        if slug.hasPrefix("var-folders-") {
+            return live.temporaryDirectory.appendingPathComponent(uuid, isDirectory: true)
+        }
+        if slug.hasPrefix("tmp-") || slug.hasPrefix("private-tmp-") {
+            return live.systemTemporaryDirectory.appendingPathComponent(uuid, isDirectory: true)
+        }
+        return nil
+    }
+
+    // MARK: - Internals
+
+    private nonisolated static func uuidSuffix(in slug: String) -> String? {
+        let pattern = #/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/#
+        guard let match = slug.firstMatch(of: pattern) else { return nil }
+        return String(match.output)
+    }
+
+    nonisolated static func isCursorRunning() -> Bool {
+        !NSRunningApplication.runningApplications(withBundleIdentifier: cursorBundleID).isEmpty
+    }
+
+    nonisolated static func readOpenWindows(
+        from cursorApplicationSupport: URL
+    ) -> (status: SnapshotStatus, folders: Set<String>, emptyWindowIDs: Set<String>) {
+        let storage = cursorApplicationSupport
+            .appendingPathComponent("User/globalStorage/storage.json", isDirectory: false)
+        guard FileManager.default.fileExists(atPath: storage.path),
+              let data = try? Data(contentsOf: storage),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return (.unavailable, [], [])
+        }
+
+        var folders: Set<String> = []
+        var emptyWindowIDs: Set<String> = []
+
+        func ingestFolderURI(_ raw: Any?) {
+            guard let uri = raw as? String, let path = path(fromFileURI: uri) else { return }
+            folders.insert((path as NSString).standardizingPath)
+        }
+
+        if let backup = json["backupWorkspaces"] as? [String: Any] {
+            if let list = backup["folders"] as? [[String: Any]] {
+                for item in list { ingestFolderURI(item["folderUri"]) }
+            }
+            if let windows = backup["emptyWindows"] as? [[String: Any]] {
+                for item in windows {
+                    if let id = item["backupFolder"] as? String, !id.isEmpty {
+                        emptyWindowIDs.insert(id)
+                    }
+                }
+            }
+        }
+
+        if let windowsState = json["windowsState"] as? [String: Any] {
+            if let opened = windowsState["openedWindows"] as? [[String: Any]] {
+                for window in opened {
+                    ingestFolderURI(window["folderUri"] ?? window["workspaceIdentifier"])
+                    if let folder = window["folder"] as? String {
+                        folders.insert((folder as NSString).standardizingPath)
+                    }
+                }
+            }
+        }
+
+        return (.available, folders, emptyWindowIDs)
+    }
+
+    private nonisolated static func numericNamespacesBlockedByUnavailableWindows(home: String) -> Bool {
+        guard isCursorRunning() else { return false }
+        let support = URL(fileURLWithPath: home)
+            .appendingPathComponent("Library/Application Support/Cursor", isDirectory: true)
+        return readOpenWindows(from: support).status != .available
+    }
+
+    private nonisolated static func staysInsideIntendedCursorRoot(_ url: URL, home: String) -> Bool {
+        let lexicalRoot = "\(home)/.cursor/projects"
+        guard PathContainment.isSameOrInside(url.standardizedFileURL.path, lexicalRoot) else { return false }
+        return PathContainment.staysInside(root: lexicalRoot, url: url, home: home, includingRoot: true)
+    }
+
+    private nonisolated static func path(fromFileURI uri: String) -> String? {
+        guard let url = URL(string: uri), url.scheme == "file" else { return nil }
+        return url.path
+    }
+}
+
+/// Working directories of processes running from Cursor.app, used to keep a
+/// live agent checkout off the list even when the window is still on the
+/// main repo. Success is tracked separately from the cwd set: other apps'
+/// cwds must not count as a completed Cursor snapshot.
+enum CursorProcessWorkingDirectories {
+    struct Snapshot {
+        var status: CursorAgentLeftoverScanPolicy.SnapshotStatus
+        var directories: Set<String>
+    }
+
+    nonisolated static func snapshot() -> Snapshot {
+        guard let pids = ProcessWorkingDirectories.allProcessIDs() else {
+            return Snapshot(status: .unavailable, directories: [])
+        }
+
+        var cursorPids: [pid_t] = []
+        for pid in pids where isCursorExecutable(pid) {
+            cursorPids.append(pid)
+        }
+
+        if CursorAgentLeftoverScanPolicy.isCursorRunning() && cursorPids.isEmpty {
+            return Snapshot(status: .unavailable, directories: [])
+        }
+
+        var directories: Set<String> = []
+        for pid in cursorPids {
+            if let cwd = ProcessWorkingDirectories.currentWorkingDirectory(of: pid), !cwd.isEmpty {
+                directories.insert((cwd as NSString).standardizingPath)
+            }
+        }
+
+        if CursorAgentLeftoverScanPolicy.isCursorRunning() && !cursorPids.isEmpty && directories.isEmpty {
+            return Snapshot(status: .unavailable, directories: [])
+        }
+
+        return Snapshot(status: .available, directories: directories)
+    }
+
+    private nonisolated static func isCursorExecutable(_ pid: pid_t) -> Bool {
+        ProcessWorkingDirectories.executablePath(of: pid)?.contains("/Cursor.app/") ?? false
+    }
+}

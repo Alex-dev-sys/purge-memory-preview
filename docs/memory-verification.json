@@ -1,0 +1,40 @@
+{
+  "date": "2026-11-10",
+  "status": "source-implemented-macos-validation-pending",
+  "designTokens": {
+    "command": "node scripts/lint-design-tokens.mjs",
+    "status": "passed"
+  },
+  "memoryLocalization": {
+    "command": "node scripts/check-memory-localization.mjs",
+    "status": "passed",
+    "keys": 102,
+    "locales": [
+      "en",
+      "zh-Hans",
+      "ru"
+    ],
+    "sourceReferences": 114
+  },
+  "swiftSources": {
+    "newFilesIncludingTests": 17,
+    "approximateLines": 2023,
+    "lexicalDelimiterCheck": "passed; not a compiler check"
+  },
+  "swiftTests": {
+    "written": 15,
+    "status": "not run: no Swift/Xcode on Windows"
+  },
+  "debugBuild": "not run",
+  "releaseBuild": "not run",
+  "fullPythonLocalization": "not run: Python not found",
+  "cpuMeasurement": "not performed",
+  "screenshots": "not captured: macOS required",
+  "egm": {
+    "converged": false,
+    "userAuthorizedCodeBeforeReviewCompletion": true
+  },
+  "implementationReport": "docs/MEMORY_IMPLEMENTATION.md",
+  "baseline": "docs/designs/memory-v1.md",
+  "driftReport": "2026-11-10_DRIFT_REPORT.md"
+}

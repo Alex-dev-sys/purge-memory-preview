@@ -1,0 +1,91 @@
+name: Memory preview
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Show Xcode version
+        run: xcodebuild -version
+      - name: Lint design tokens
+        run: node scripts/lint-design-tokens.mjs
+      - name: Check translations
+        run: python3 scripts/check-localization.py
+      - name: Build and run tests
+        run: |
+          xcodebuild test \
+            -project purge.xcodeproj \
+            -scheme purge \
+            -destination 'platform=macOS' \
+            -skip-testing:PurgeTests/ProcessRunnerTests \
+            -skip-testing:PurgeTests/FolderSizingConcurrencyTests \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+  package-preview:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: build-and-test
+    runs-on: macos-26
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Configure isolated preview identity
+        run: ruby scripts/configure-memory-preview.rb
+      - name: Build preview app
+        run: |
+          xcodebuild clean build \
+            -project purge.xcodeproj \
+            -scheme purge \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES
+      - name: Stage and package DMG
+        id: package
+        run: |
+          set -euo pipefail
+          APP="$(pwd)/build/Build/Products/Release/Purge.app"
+          if [ ! -d "$APP" ]; then
+            APP="$(xcodebuild -project purge.xcodeproj -scheme purge -configuration Release -showBuildSettings | awk -F ' = ' '/ TARGET_BUILD_DIR = / { d=$2 } / FULL_PRODUCT_NAME = / { p=$2 } END { print d "/" p }')"
+          fi
+          test -d "$APP"
+          VERSION="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+          BUILD="${GITHUB_RUN_NUMBER}"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$APP/Contents/Info.plist"
+          STAGE="$RUNNER_TEMP/stage"
+          mkdir -p "$STAGE"
+          ditto "$APP" "$STAGE/Purge Memory Preview.app"
+          ln -s /Applications "$STAGE/Applications"
+          DMG="$RUNNER_TEMP/Purge-Memory-Preview-${VERSION}-${BUILD}.dmg"
+          hdiutil create -volname 'Purge Memory Preview' -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+          shasum -a 256 "$DMG" | tee "$RUNNER_TEMP/SHA256SUMS.txt"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="memory-preview-${{ steps.package.outputs.build }}"
+          gh release create "$TAG" "${{ steps.package.outputs.dmg }}" \
+            "$RUNNER_TEMP/SHA256SUMS.txt" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Memory preview ${{ steps.package.outputs.version }} (build ${{ steps.package.outputs.build }})" \
+            --prerelease \
+            --notes "Unsigned test build of the Memory preview. This DMG is not notarized; macOS may ask you to approve opening the app. The preview uses a separate bundle identifier and does not use the production Sparkle feed."

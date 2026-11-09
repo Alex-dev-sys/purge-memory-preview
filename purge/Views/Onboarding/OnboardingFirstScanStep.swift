@@ -1,0 +1,83 @@
+import SwiftUI
+
+struct OnboardingFirstScanStep: View {
+  @EnvironmentObject private var store: PurgeStore
+  @ObservedObject var revealController: OnboardingScanRevealController
+
+  let onScanComplete: () -> Void
+
+  @State private var scanStarted = false
+  @State private var scanBeganAt = Date()
+
+  private static let minimumScanDuration: TimeInterval = 2
+  private static let rowInsertionTransition: AnyTransition = .asymmetric(
+    insertion: .opacity.combined(with: .offset(y: 8)),
+    removal: .opacity
+  )
+
+  var body: some View {
+    VStack(alignment: .center, spacing: AppStyle.Spacing.medium) {
+      OnboardingLoadingStepTitle(baseText: String(localized: "Running your first scan"))
+
+      OnboardingProgressBar(progress: combinedProgress)
+        .padding(.bottom, AppStyle.Spacing.xSmall)
+        .frame(maxWidth: .infinity)
+
+      OnboardingFadingScrollView {
+        LazyVStack(spacing: AppStyle.Spacing.xSmall) {
+          ForEach(revealController.revealedItems) { item in
+            ScanListRow(icon: item.icon, title: item.title, formattedSize: item.formattedSize)
+            .frame(height: OnboardingLayout.scanRowHeight)
+            .onboardingScrollEdgeBlur()
+            .transition(Self.rowInsertionTransition)
+          }
+        }
+        .padding(.bottom, AppStyle.Spacing.xSmall)
+      }
+      .accessibilityLabel("Items found, \(revealController.revealedItems.count)")
+    }
+    .frame(maxWidth: OnboardingLayout.contentMaxWidth, maxHeight: .infinity, alignment: .top)
+    .onAppear {
+      guard !scanStarted else { return }
+      scanStarted = true
+      scanBeganAt = Date()
+
+      Task {
+        await store.scanAll()
+        revealController.markSourceScanFinished()
+      }
+
+      revealController.startReveal(
+        itemProvider: { store.onboardingScanFindings() },
+        scanFinished: {
+          revealController.sourceScanFinished
+            && !store.isScanningAll
+            && !store.isEnrichingGeneral
+            && !store.isEnrichingDeveloper
+        },
+        onReadyForResults: finishOnboardingScan
+      )
+    }
+    .onDisappear {
+      revealController.cancel()
+    }
+  }
+
+  private var combinedProgress: Double {
+    // Enrichment runs after the scan itself, and the step waits for it too.
+    let isWorking = store.isScanningAll || store.isEnrichingGeneral || store.isEnrichingDeveloper
+    let scanProgress: Double = isWorking ? 0.65 : 1
+    return min(1, max(revealController.simulatedProgress, scanProgress * 0.35 + revealController.simulatedProgress * 0.65))
+  }
+
+  private func finishOnboardingScan() {
+    Task { @MainActor in
+      let remaining = Self.minimumScanDuration - Date().timeIntervalSince(scanBeganAt)
+      if remaining > 0 {
+        try? await Task.sleep(for: .seconds(remaining))
+      }
+      guard scanStarted else { return }
+      onScanComplete()
+    }
+  }
+}

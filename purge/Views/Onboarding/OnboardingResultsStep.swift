@@ -1,0 +1,241 @@
+import SwiftUI
+
+struct OnboardingResultsCategory: Identifiable {
+  /// What the bytes are. "Show me" picks its tab by this, never by the title,
+  /// which is translated (#187).
+  enum Kind {
+    case appCaches
+    case devArtifacts
+    case browserCaches
+    case systemJunk
+  }
+
+  let kind: Kind
+  let bytes: Int64
+
+  var id: Kind { kind }
+
+  var title: String {
+    switch kind {
+    case .appCaches: return String(localized: "App caches")
+    case .devArtifacts: return String(localized: "Dev tool artifacts")
+    case .browserCaches: return String(localized: "Browser caches")
+    case .systemJunk: return String(localized: "System junk")
+    }
+  }
+
+  var symbol: String {
+    switch kind {
+    case .appCaches: return "internaldrive"
+    case .devArtifacts: return "hammer"
+    case .browserCaches: return "globe"
+    case .systemJunk: return "doc.text"
+    }
+  }
+}
+
+struct OnboardingResultsSnapshot {
+  let totalBytes: Int64
+  let categories: [OnboardingResultsCategory]
+}
+
+extension PurgeStore {
+  /// The big number, its rows and the Clean button all come from the list the
+  /// clean takes, so they show what it moves. The number used to be the sidebar
+  /// total, worked out by other rules (#183).
+  var onboardingResultsSnapshot: OnboardingResultsSnapshot {
+    onboardingResultsSnapshot(for: manualSafeCleanupCandidates())
+  }
+
+  func onboardingResultsSnapshot(for candidates: [DeletionCandidate]) -> OnboardingResultsSnapshot {
+    OnboardingResultsSnapshot(
+      totalBytes: candidates.reduce(Int64(0)) { $0 + $1.sizeBytes },
+      categories: resultsCategories(for: candidates)
+    )
+  }
+
+  func resultsCategories(for candidates: [DeletionCandidate]) -> [OnboardingResultsCategory] {
+    var browserBytes: Int64 = 0
+    var appCacheBytes: Int64 = 0
+    var systemJunkBytes: Int64 = 0
+    var devArtifactBytes: Int64 = 0
+
+    // One pass over the cache rows, by the paths each row stored when it was
+    // made. Searching every row's folders for every candidate, standardizing both
+    // paths each time, took about 900 ms for 300 rows of two folders (#190). The
+    // first row that holds a path wins, as the search did.
+    var cacheItemByPath: [String: CacheItem] = [:]
+    for item in cacheItems {
+      for path in item.standardizedPaths where cacheItemByPath[path] == nil {
+        cacheItemByPath[path] = item
+      }
+    }
+
+    for candidate in candidates {
+      if let item = cacheItemByPath[candidate.path.standardizedFileURL.path] {
+        if Self.isBrowserCacheItem(item) {
+          browserBytes += candidate.sizeBytes
+        } else if Self.isSystemJunkCacheItem(item) {
+          systemJunkBytes += candidate.sizeBytes
+        } else {
+          appCacheBytes += candidate.sizeBytes
+        }
+      } else {
+        devArtifactBytes += candidate.sizeBytes
+      }
+    }
+
+    let categories = [
+      OnboardingResultsCategory(kind: .appCaches, bytes: appCacheBytes),
+      OnboardingResultsCategory(kind: .devArtifacts, bytes: devArtifactBytes),
+      OnboardingResultsCategory(kind: .browserCaches, bytes: browserBytes),
+      OnboardingResultsCategory(kind: .systemJunk, bytes: systemJunkBytes),
+    ]
+
+    return categories
+      .filter { $0.bytes > 0 }
+      .sorted { $0.bytes > $1.bytes }
+      .prefix(4)
+      .map { $0 }
+  }
+
+  func onboardingScanFindings(limit: Int = 12) -> [OnboardingScanFinding] {
+    onboardingFindings(for: Array(manualSafeCleanupCandidates().prefix(limit)))
+  }
+
+  func onboardingFindings(for candidates: [DeletionCandidate]) -> [OnboardingScanFinding] {
+    let iconSources = onboardingIconSourcesByPath()
+
+    return candidates.map { candidate in
+      OnboardingScanFinding(
+        candidate: candidate,
+        icon: iconSources[candidate.path.standardizedFileURL.path] ?? .sfSymbol("folder.fill")
+      )
+    }
+  }
+
+  /// A `DeletionCandidate` keeps only a path, so map each path back to the scan result it came
+  /// from — that's what knows which brand icon to draw.
+  private func onboardingIconSourcesByPath() -> [String: AdaptiveBrandIconImage.Source] {
+    var sources: [String: AdaptiveBrandIconImage.Source] = [:]
+
+    for group in projectGroups {
+      for artifact in group.artifacts {
+        sources[artifact.path.standardizedFileURL.path] = .projectGroup(group)
+      }
+    }
+
+    for tool in devTools {
+      for path in tool.paths {
+        sources[path.standardizedFileURL.path] = .devTool(tool)
+      }
+    }
+
+    for item in cacheItems {
+      for location in item.locations {
+        sources[location.path.standardizedFileURL.path] = .cacheItem(item)
+      }
+    }
+
+    return sources
+  }
+
+  private static let browserDefinitionKeys: Set<String> = [
+    "safari", "chrome", "firefox", "brave", "arc-browser", "zen", "opera",
+  ]
+
+  private static let browserBundlePrefixes: [String] = [
+    "com.google.Chrome",
+    "com.apple.Safari",
+    "org.mozilla.firefox",
+    "com.brave.Browser",
+    "company.thebrowser.",
+    "com.microsoft.edgemac",
+    "com.operasoftware.Opera",
+  ]
+
+  /// Matched by definition key and folder, never by row name: names are translated.
+  private static let systemJunkDefinitionKeys: Set<String> = [
+    "applogs",
+    "crashreports",
+    "macos-installer",
+  ]
+
+  /// The font cache has no bundled definition, so it is matched by its folder.
+  private static let systemJunkFolderNames: Set<String> = [
+    "com.apple.ATS",
+  ]
+
+  /// By definition key and folder, never by row name, which is translated: in
+  /// Chinese no row name says "browser" (#183). Entries marked `kind: browser`
+  /// in explanations.json count, so a new browser entry needs no change here.
+  private static func isBrowserCacheItem(_ item: CacheItem) -> Bool {
+    if let key = item.definitionKey, browserDefinitionKeys.contains(key) {
+      return true
+    }
+    if let key = item.definitionKey ?? ExplanationDatabase.definitionKey(forFolderName: item.bundleID),
+       ExplanationDatabase.kind(forKey: key) == .browser {
+      return true
+    }
+
+    let folder = item.bundleID.lowercased()
+    return browserBundlePrefixes.contains(where: { folder.hasPrefix($0.lowercased()) })
+  }
+
+  private static func isSystemJunkCacheItem(_ item: CacheItem) -> Bool {
+    if let key = item.definitionKey, systemJunkDefinitionKeys.contains(key) {
+      return true
+    }
+    return systemJunkFolderNames.contains(item.bundleID)
+  }
+}
+
+struct OnboardingResultsStep: View {
+  @EnvironmentObject private var store: PurgeStore
+  let snapshot: OnboardingResultsSnapshot?
+
+  init(snapshot: OnboardingResultsSnapshot? = nil) {
+    self.snapshot = snapshot
+  }
+
+  var body: some View {
+    let shown = snapshot ?? store.onboardingResultsSnapshot
+    let totalBytes = shown.totalBytes
+    let categories = shown.categories
+    VStack(alignment: .center, spacing: AppStyle.Spacing.large) {
+      VStack(alignment: .center, spacing: AppStyle.Spacing.xLarge) {
+        VStack(alignment: .center, spacing: 0) {
+          Text(formatBytes(totalBytes))
+            .font(AppStyle.Typography.display.numbers)
+            .monospacedDigit()
+            .multilineTextAlignment(.center)
+            .accessibilityLabel("\(formatBytes(totalBytes)) ready to clean")
+
+          Text("ready to clean on your Mac")
+            .font(AppStyle.Typography.sectionTitle.weight(.medium))
+            .foregroundStyle(AppColors.textSecondary)
+            .multilineTextAlignment(.center)
+        }
+
+        if let comparisonItems = OnboardingSizeComparison.items(for: totalBytes) {
+          OnboardingSizeComparisonLine(items: comparisonItems)
+        }
+      }
+      .padding(.bottom, AppStyle.Spacing.medium)
+
+      VStack(alignment: .leading, spacing: AppStyle.Spacing.xSmall) {
+        ForEach(Array(categories.enumerated()), id: \.element.id) { index, category in
+          OnboardingResultsCategoryRow(
+            symbol: category.symbol,
+            title: category.title,
+            formattedSize: formatBytes(category.bytes)
+          )
+          .onboardingBlurIn(index: index)
+        }
+      }
+      .frame(maxWidth: 300)
+      .frame(maxWidth: .infinity)
+    }
+    .frame(maxWidth: OnboardingLayout.contentMaxWidth)
+  }
+}

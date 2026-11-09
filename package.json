@@ -1,0 +1,14 @@
+{
+  "name": "purge-brand-icons",
+  "private": true,
+  "scripts": {
+    "generate:icons": "node scripts/generate-brand-icons.mjs",
+    "lint:design": "node scripts/lint-design-tokens.mjs",
+    "lint:memory-localization": "node scripts/check-memory-localization.mjs"
+  },
+  "devDependencies": {
+    "sharp": "^0.33.5",
+    "simple-icons": "^14.12.3",
+    "simple-icons-v16": "npm:simple-icons@^16.20.0"
+  }
+}

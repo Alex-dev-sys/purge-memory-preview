@@ -1,0 +1,359 @@
+import AppKit
+import Foundation
+
+/// Rules for noticing an app leave the Applications folders outside Purge and
+/// deciding whether its leftovers are worth a review (issue #65). Shared with the
+/// background agent, so it stays free of the uninstaller's policy and models.
+///
+/// A bundle dragged to the Trash is reviewed the moment it lands there. Anything
+/// else is followed for a while first (`followDecision`), because that is how
+/// updaters work: `brew upgrade` moves the old copy into the Caskroom before the
+/// new one arrives, and some installers delete it before writing the new one.
+/// Every stage also asks again whether another copy of the app is still on this
+/// Mac: the agent before it records the removal, Purge before it shows the review,
+/// a live watch while the review is open, and Purge once more when the user
+/// confirms.
+nonisolated enum RemovedAppWatchPolicy {
+
+    /// Where a departed bundle went, read from a handle opened while it was
+    /// still in the app roots (see `ApplicationsFolderWatcher`).
+    enum DepartureKind: Equatable, Sendable {
+        /// In a Trash: the user deleted it. Reviewed at once.
+        case trashed
+        /// Still on disk outside the roots: moved to the Desktop, or set aside by
+        /// an updater. Not a removal while it stays there.
+        case movedElsewhere
+        /// Gone from disk, or its whereabouts are unknown.
+        case deleted
+    }
+
+    /// How long a departure that did not go to the Trash is followed.
+    struct FollowTiming: Sendable {
+        /// A deleted bundle counts once the app roots have had no changes for this
+        /// long. An installer that deletes the old copy first keeps writing while it
+        /// installs the new one, which keeps pushing this back; a plain `rm` is
+        /// reviewed this long after it happens.
+        var quietPeriod: Duration
+        /// A deleted bundle counts after this long even if the roots never go quiet,
+        /// since other apps can write near the top of `/Applications` at any time.
+        var maxDeletedWait: Duration
+        /// How long a copy moved out of the roots is followed. Deleting or trashing
+        /// it in that time is a removal (`brew uninstall` moves the app into the
+        /// Caskroom, then deletes it); still there at the end means it was moved.
+        var movedFollowWindow: Duration
+        /// How often a followed bundle is checked. Nothing reports on a copy
+        /// outside the roots being deleted, so it is polled; one `fcntl` and one
+        /// `lstat` per check, only while a departure is being followed.
+        var pollInterval: Duration
+
+        static let standard = FollowTiming(
+            quietPeriod: .seconds(2),
+            maxDeletedWait: .seconds(30),
+            movedFollowWindow: .seconds(60),
+            pollInterval: .milliseconds(250)
+        )
+    }
+
+    enum FollowDecision: Equatable, Sendable {
+        case report
+        case drop
+        case keepFollowing
+    }
+
+    /// What to do with a departure that did not go straight to the Trash, at one
+    /// check. `sinceDeleted` is how long the bundle has been known to be deleted
+    /// (nil while it still exists somewhere).
+    static func followDecision(
+        kind: DepartureKind,
+        appIsBack: Bool,
+        sinceDeparture: Duration,
+        sinceDeleted: Duration?,
+        sinceActivity: Duration,
+        timing: FollowTiming
+    ) -> FollowDecision {
+        // The update landed, or the app was put back: nothing was removed.
+        if appIsBack { return .drop }
+        switch kind {
+        case .trashed:
+            return .report
+        case .movedElsewhere:
+            return sinceDeparture >= timing.movedFollowWindow ? .drop : .keepFollowing
+        case .deleted:
+            if sinceActivity >= timing.quietPeriod { return .report }
+            if let sinceDeleted, sinceDeleted >= timing.maxDeletedWait { return .report }
+            return .keepFollowing
+        }
+    }
+
+    /// How long an unhandled removal record stays worth acting on. A record only
+    /// waits when Purge cannot show it yet (onboarding, Full Disk Access), and a
+    /// review about an app removed more than a week ago would read as a bug.
+    static let recordLifetime: TimeInterval = 7 * 24 * 60 * 60
+
+    /// How long to wait before reading a bundle with no identifier yet for the
+    /// `attempt`th time (from 1), or nil once it has been read enough. Doubles
+    /// from two seconds to a minute, then stays there: nine reads over about
+    /// five minutes, where 150 full listings used to run (#177). A copy that
+    /// lands in the first seconds is still read within seconds.
+    static func incompleteRecheckDelay(attempt: Int) -> Duration? {
+        guard attempt >= 1, attempt <= 9 else { return nil }
+        return .seconds(min(60, 2 << (attempt - 1)))
+    }
+
+    /// FSEvents can report `/Applications` by its data-volume path, and directory
+    /// events carry a trailing slash. Both are folded away so paths compare equal to
+    /// the roots `AppUninstallScanPolicy` hands out.
+    static func normalizedPath(_ path: String) -> String {
+        var result = path
+        let dataVolume = "/System/Volumes/Data"
+        if result.hasPrefix(dataVolume + "/") {
+            result.removeFirst(dataVolume.count)
+        }
+        while result.count > 1 && result.hasSuffix("/") {
+            result.removeLast()
+        }
+        return result
+    }
+
+    /// Whether a change reported at `path` can add or remove a watched bundle: the
+    /// root itself, a folder directly inside it (a vendor folder, or a bundle being
+    /// swapped), or any folder further down that the uninstaller walks
+    /// (`/Applications/Autodesk/AutoCAD 2026`). Anything through a bundle is that
+    /// bundle's own internals churning during an update or a launch, which is most
+    /// of the traffic under `/Applications`.
+    static func isRelevantChange(atPath path: String, roots: [String]) -> Bool {
+        let normalized = normalizedPath(path)
+        for root in roots {
+            if normalized == root { return true }
+            guard normalized.hasPrefix(root + "/") else { continue }
+            let folders = normalized.dropFirst(root.count + 1).split(separator: "/")
+            if folders.count == 1 { return true }
+            return folders.count <= AppBundleReach.maxFolderDepth
+                && !folders.contains { $0.hasPrefix(".") || AppBundleReach.isBundleFolderName($0) }
+        }
+        return false
+    }
+
+    /// Bundles in `previous` that are missing from `current`, both keyed by bundle path.
+    static func departedApps(
+        previous: [String: InstalledApp],
+        current: [String: InstalledApp]
+    ) -> [InstalledApp] {
+        previous
+            .filter { current[$0.key] == nil }
+            .map(\.value)
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Whether a bundle that left gets a leftovers review.
+    ///
+    /// - A bundle back at its path was an update, not a removal.
+    /// - Another bundle with the same identifier still in the app roots, or anywhere
+    ///   else on this Mac (`otherCopyExists`), means the app was moved, renamed, or is
+    ///   mid-update; its support files are still in use.
+    /// - Purge's own uninstaller already reviewed what it removed.
+    /// - Without a bundle identifier only weak name matches are possible, which is
+    ///   not enough to interrupt the user for.
+    static func shouldOfferReview(
+        for app: InstalledApp,
+        bundleStillExists: Bool,
+        installedBundleIDs: Set<String>,
+        otherCopyExists: Bool,
+        removedByPurge: Bool
+    ) -> Bool {
+        guard !removedByPurge, !bundleStillExists, !otherCopyExists else { return false }
+        let path = app.bundleURL.standardizedFileURL.path
+        if path.hasPrefix("/System/") { return false }
+        guard let bundleID = app.bundleID?.lowercased(), !bundleID.isEmpty else { return false }
+        if bundleID == "io.getpurge.app" { return false }
+        return !installedBundleIDs.contains(bundleID)
+    }
+
+    // MARK: Other copies
+
+    /// Whether Launch Services knows a live copy of `app` somewhere other than the
+    /// path it left. Catches what the app-root index cannot: an app dragged to the
+    /// Desktop or an external drive, and the copy an updater has staged or set
+    /// aside while it swaps bundles.
+    static func otherCopyExists(of app: InstalledApp) -> Bool {
+        guard let bundleID = app.bundleID, !bundleID.isEmpty else { return false }
+        let candidates = NSWorkspace.shared.urlsForApplications(withBundleIdentifier: bundleID)
+        return candidates.contains { countsAsOtherCopy($0, of: app) }
+    }
+
+    /// A Launch Services hit counts when it is really on disk, is not the path the
+    /// app left, is not in a Trash, and is not on a read-only volume (a mounted
+    /// installer disk image still carries the app the user just deleted).
+    static func countsAsOtherCopy(_ url: URL, of app: InstalledApp) -> Bool {
+        let path = normalizedPath(url.standardizedFileURL.path)
+        guard path != normalizedPath(app.id) else { return false }
+        guard !isInTrash(path: path) else { return false }
+        guard FileManager.default.fileExists(atPath: path) else { return false }
+        let readOnly = (try? url.resourceValues(forKeys: [.volumeIsReadOnlyKey]))?.volumeIsReadOnly ?? false
+        return !readOnly
+    }
+
+    /// Inside any Trash: the home Trash, a volume's `.Trashes`, or iCloud Drive's.
+    static func isInTrash(path: String) -> Bool {
+        path.split(separator: "/").contains { $0 == ".Trash" || $0 == ".Trashes" }
+    }
+
+    // MARK: Identity
+
+    /// The file-system number of the item at `path`. A move to the Trash on the same
+    /// volume keeps it, so it identifies the trashed bundle even after Finder renames
+    /// it to avoid a clash with an older copy.
+    static func fileNumber(atPath path: String) -> UInt64? {
+        var info = stat()
+        guard lstat(path, &info) == 0 else { return nil }
+        return UInt64(info.st_ino)
+    }
+
+    /// The device number of the volume holding the item at `path`, following a
+    /// symlink, so a `~/Applications` that points at an external drive reports
+    /// that drive.
+    static func deviceNumber(atPath path: String) -> Int64? {
+        var info = stat()
+        guard stat(path, &info) == 0 else { return nil }
+        return Int64(info.st_dev)
+    }
+
+    /// `path` with every symlink resolved, or `path` itself when it cannot be
+    /// resolved (nothing there). `realpath`, which keeps `/private` on `/var` and
+    /// `/tmp` paths, rather than `resolvingSymlinksInPath()`, which drops it.
+    static func resolvedPath(_ path: String) -> String {
+        guard let real = realpath(path, nil) else { return path }
+        defer { free(real) }
+        return String(cString: real)
+    }
+
+    /// The nearest ancestor of `path` that exists, `/` at the latest. For a root
+    /// on an ejected drive that is `/Volumes`, which is where the drive comes back.
+    static func nearestExistingAncestor(ofPath path: String) -> String {
+        var current = (path as NSString).deletingLastPathComponent
+        while current != "/", !current.isEmpty, !FileManager.default.fileExists(atPath: current) {
+            current = (current as NSString).deletingLastPathComponent
+        }
+        return current.isEmpty ? "/" : current
+    }
+
+    /// Whether a root no longer at its path went with its volume (ejected,
+    /// unplugged) rather than being renamed or deleted on one still mounted.
+    /// `rootDevice` is the device the root was on when it was last listed, and
+    /// `ancestorDevice` that of its nearest ancestor still there: the same device
+    /// means the volume is mounted and the root itself is gone. Nothing on a
+    /// volume that went away was removed, so its bundles must not be reported.
+    static func rootVolumeIsGone(rootDevice: Int64?, ancestorDevice: Int64?) -> Bool {
+        guard let rootDevice, let ancestorDevice else { return false }
+        return rootDevice != ancestorDevice
+    }
+
+    /// Classifies a departure from the path a handle on the bundle reports now.
+    /// A handle on a deleted item still reports its last path, so the item there
+    /// only counts when it is the same file (`fileNumber`); a path that is empty
+    /// or now holds a replacement means the bundle itself is gone.
+    static func departureKind(currentPath: String?, fileNumber: UInt64?) -> DepartureKind {
+        guard let currentPath, let fileNumber,
+              Self.fileNumber(atPath: currentPath) == fileNumber
+        else { return .deleted }
+        return isInTrash(path: currentPath) ? .trashed : .movedElsewhere
+    }
+
+    /// The bundle in `trashDirectory` that is the same file as the one that left.
+    /// Never a match by name: a stale copy of the same app from an earlier delete
+    /// must not stand in for this one.
+    static func trashedCopy(fileNumber: UInt64?, in trashDirectory: URL) -> URL? {
+        guard let fileNumber else { return nil }
+        let entries = (try? FileManager.default.contentsOfDirectory(
+            at: trashDirectory,
+            includingPropertiesForKeys: nil
+        )) ?? []
+        return entries.first {
+            $0.pathExtension == "app" && Self.fileNumber(atPath: $0.path) == fileNumber
+        }
+    }
+
+    // MARK: Agent updates
+
+    /// What the agent's own executable says about the Purge it came from.
+    enum AgentHome: Equatable, Sendable {
+        /// Still the file the agent started from.
+        case unchanged
+        /// Different from the last check: a copy may still be landing.
+        case settling
+        /// A different file, the same on two checks: Purge was updated. The agent
+        /// exits so launchd starts the new one. A running process keeps its old
+        /// code, and launchd only starts it again when it exits.
+        case replaced
+        /// Nothing there on two checks: Purge was trashed, moved, or deleted. The
+        /// agent stops watching rather than exiting, because launchd would start
+        /// it again from wherever the bundle went, the Trash included.
+        case gone
+    }
+
+    /// `launched` is the file number of the agent's executable when it started,
+    /// `previous` and `current` the numbers at the last two checks (nil when
+    /// nothing is there). Waiting for the same reading twice means a half-copied
+    /// bundle is never launched.
+    static func agentHome(launched: UInt64?, previous: UInt64?, current: UInt64?) -> AgentHome {
+        guard let launched, current != launched else { return .unchanged }
+        guard previous == current else { return .settling }
+        return current == nil ? .gone : .replaced
+    }
+
+    /// Whether Purge announcing `ownerPath` as its agent means this agent, running
+    /// from `ownPath`, is the wrong copy. An owner path with nothing there is
+    /// ignored, so a build without the agent cannot stop a working one.
+    static func agentIsStale(ownPath: String, ownerPath: String, ownerExists: Bool) -> Bool {
+        guard ownerExists else { return false }
+        return normalizedPath(ownPath) != normalizedPath(ownerPath)
+    }
+
+    // MARK: Records
+
+    /// Checks a removal record before Purge acts on it. The record is a file any
+    /// process running as the user could write, so its path must be a bundle the
+    /// watcher could really have indexed, its identifier must look like one, and its
+    /// name must be short plain text.
+    /// What Purge does with itself once a review it opened its window for is over.
+    enum ReviewWindowExit: Equatable, Sendable {
+        /// The watcher started Purge for this review, or on-demand mode has no
+        /// menu bar icon to come back to: quit now.
+        case quit
+        /// The same, but a clean the user started is running beside the review.
+        /// Quitting now would meet the quit guard with a "still cleaning" alert
+        /// for a quit nobody asked for, so it waits for the clean to end (#173).
+        case quitAfterClean
+        /// Menu bar mode: hide the window and keep running.
+        case hide
+    }
+
+    static func reviewWindowExit(quitsWhenDone: Bool, showsMenuBarIcon: Bool, cleanInProgress: Bool) -> ReviewWindowExit {
+        guard quitsWhenDone || !showsMenuBarIcon else { return .hide }
+        return cleanInProgress ? .quitAfterClean : .quit
+    }
+
+    static func isValidRecord(path: String, bundleID: String, name: String, roots: [String]) -> Bool {
+        let normalized = normalizedPath(path)
+        guard normalized.hasSuffix(".app"), !normalized.contains("/../"), !normalized.contains("/./") else {
+            return false
+        }
+        guard AppFolders.folderDepth(ofAppAtPath: normalized, roots: roots) != nil else { return false }
+
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_")
+        guard (1...255).contains(bundleID.count),
+              bundleID.unicodeScalars.allSatisfy(allowed.contains),
+              bundleID.contains(".")
+        else { return false }
+
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard (1...128).contains(trimmed.count) else { return false }
+        return !name.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
+    }
+
+    /// The folders the uninstaller lists apps from (`AppFolders`), which the
+    /// agent binary compiles too.
+    static func installedAppRoots() -> [URL] {
+        AppFolders.roots()
+    }
+}

@@ -1,0 +1,113 @@
+name: Site safety page
+
+# purgemac.com/safety is generated from these files. Build it from this
+# branch so a change the site can't read is caught on the pull request,
+# not on release day. The site also fails the build when evaluate allows
+# something it does not describe. The files beyond DeletionSafetyPolicy.swift
+# are the ones lib/safety.ts pins its shape rules to.
+
+on:
+  pull_request:
+    paths:
+      - purge/Services/DeletionSafetyPolicy.swift
+      - purge/Services/OldToolVersionScanPolicy.swift
+      - purge/Services/CacheDiscoveryPaths.swift
+      - purge/Services/EditorWorkspaceStoragePolicy.swift
+      - purge/Services/CursorAgentLeftoverScanPolicy.swift
+      - purge/Services/AgentWorktreeScanPolicy.swift
+      - purge/PrivilegedHelper/MacOSInstallLeftovers.swift
+      - purge/Resources/explanations.json
+      - purge/Models/ProjectArtifactCatalog.swift
+      - .github/workflows/site-safety-page.yml
+  push:
+    branches: [main]
+    paths:
+      - purge/Services/DeletionSafetyPolicy.swift
+      - purge/Services/OldToolVersionScanPolicy.swift
+      - purge/Services/CacheDiscoveryPaths.swift
+      - purge/Services/EditorWorkspaceStoragePolicy.swift
+      - purge/Services/CursorAgentLeftoverScanPolicy.swift
+      - purge/Services/AgentWorktreeScanPolicy.swift
+      - purge/PrivilegedHelper/MacOSInstallLeftovers.swift
+      - purge/Resources/explanations.json
+      - purge/Models/ProjectArtifactCatalog.swift
+      - .github/workflows/site-safety-page.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build /safety from this branch
+    # Pull requests from forks and Dependabot get no repository secrets, so
+    # they can't read the private site. Their change is checked after merge,
+    # on the push to main.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          path: app
+
+      - name: Check the site token can read purge-landing-page
+        env:
+          LANDING_REPO_TOKEN: ${{ secrets.LANDING_REPO_TOKEN }}
+        run: |
+          if [ -z "$LANDING_REPO_TOKEN" ]; then
+            echo "::error::LANDING_REPO_TOKEN is not set. purge-landing-page is private, so this job needs a fine-grained token with read access to its contents."
+            exit 1
+          fi
+          # Prints who the token belongs to and whether it can see the repo, so
+          # a token scoped to the wrong account or repository fails here with
+          # a reason instead of as "Not Found" inside actions/checkout.
+          # purge-app is public, so this log is public: print only the token
+          # kind, its login, classic scopes, and a repository count.
+          case "$LANDING_REPO_TOKEN" in
+            github_pat_*) KIND="fine-grained" ;;
+            ghp_*) KIND="classic" ;;
+            *) KIND="unrecognised prefix" ;;
+          esac
+          AUTH="Authorization: Bearer $LANDING_REPO_TOKEN"
+          LOGIN=$(curl -sS --max-time 20 -H "$AUTH" https://api.github.com/user | jq -r '.login // "unknown"')
+          SCOPES=$(curl -sS --max-time 20 -I -H "$AUTH" https://api.github.com/user | grep -i '^x-oauth-scopes:' | cut -d' ' -f2- | tr -d '\r')
+          VISIBLE=$(curl -sS --max-time 20 -H "$AUTH" "https://api.github.com/user/repos?per_page=100&affiliation=owner" | jq 'if type=="array" then length else 0 end')
+          STATUS=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' -H "$AUTH" https://api.github.com/repos/jithin-sabu/purge-landing-page)
+          echo "Token: $KIND, belongs to $LOGIN, classic scopes: [${SCOPES:-none}], can see $VISIBLE repositories you own."
+          echo "GET /repos/jithin-sabu/purge-landing-page -> $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            case "$KIND" in
+              fine-grained) HINT="Under Repository access choose 'Only select repositories' and tick purge-landing-page, with Contents: Read-only." ;;
+              classic) HINT="A classic token needs the full 'repo' scope to read a private repository." ;;
+              *) HINT="Use a fine-grained token scoped to purge-landing-page with Contents: Read-only." ;;
+            esac
+            echo "::error::LANDING_REPO_TOKEN cannot read jithin-sabu/purge-landing-page (HTTP $STATUS). $HINT"
+            exit 1
+          fi
+
+      - name: Check out purgemac.com
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          repository: jithin-sabu/purge-landing-page
+          token: ${{ secrets.LANDING_REPO_TOKEN }}
+          path: site
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install
+        working-directory: site
+        run: npm ci
+
+      - name: Build
+        working-directory: site
+        env:
+          SAFETY_SOURCE_DIR: ${{ github.workspace }}/app
+        run: npm run build
