@@ -105,10 +105,12 @@ final class MemoryActionService: ObservableObject {
 
     init(settings: MemorySettingsStore, history: MemoryHistoryStore, processes: any ProcessMemoryProviding,
          stats: any MemoryStatsProviding, policy: MemorySafetyPolicy,
-         applications: any MemoryApplicationControlling = MemoryApplicationController(),
-         clock: any MemoryActionClock = MemoryContinuousClock()) {
+         applications: (any MemoryApplicationControlling)? = nil,
+         clock: (any MemoryActionClock)? = nil) {
         self.settings = settings; self.history = history; self.processes = processes
-        self.stats = stats; self.policy = policy; self.applications = applications; self.clock = clock
+        self.stats = stats; self.policy = policy
+        self.applications = applications ?? MemoryApplicationController()
+        self.clock = clock ?? MemoryContinuousClock()
     }
 
     func canAct(_ group: MemoryProcessGroup, now: Date = Date()) -> Bool {

@@ -35,8 +35,12 @@ final class MemoryCoordinator: ObservableObject {
     private var pressureGeneration = UUID()
     private var subscriptions: [AnyCancellable] = []
 
-    init(settings: MemorySettingsStore = MemorySettingsStore(), history: MemoryHistoryStore = MemoryHistoryStore(),
-         stats: any MemoryStatsProviding = MemoryStatsProvider(), processes: any ProcessMemoryProviding = ProcessMemoryProvider()) {
+    init(settings: MemorySettingsStore? = nil, history: MemoryHistoryStore? = nil,
+         stats: (any MemoryStatsProviding)? = nil, processes: (any ProcessMemoryProviding)? = nil) {
+        let settings = settings ?? MemorySettingsStore()
+        let history = history ?? MemoryHistoryStore()
+        let stats = stats ?? MemoryStatsProvider()
+        let processes = processes ?? ProcessMemoryProvider()
         self.settings = settings; self.history = history; self.stats = stats; self.processes = processes
         let policy = MemorySafetyPolicy(currentUID: getuid(), ownPID: getpid(), ownBundleID: Bundle.main.bundleIdentifier,
                                         ownBundlePath: Bundle.main.bundleURL.resolvingSymlinksInPath().path)
