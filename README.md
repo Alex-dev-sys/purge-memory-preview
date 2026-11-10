@@ -1,112 +1,179 @@
 <div align="center">
-  <img src="Assets/purge-iOS-Default-1024x1024@1x.png" width="112" alt="Purge app icon" />
-  <h1>Purge Memory Preview</h1>
-  <p>A native macOS app for reviewing disk usage and managing memory.</p>
-  <p>English · <a href="README.zh-CN.md">简体中文</a></p>
+  <img src="Assets/readme-hero.svg" width="100%" alt="Purge Memory Preview — порядок на диске и контроль над памятью" />
+  <br /><br />
+  <p><strong>Понятная очистка диска и управление оперативной памятью на Mac.</strong></p>
+  <p>Посмотрите, что занимает место, разберите лишнее и следите за памятью — с объяснениями перед важными действиями.</p>
   <p>
-    <a href="https://github.com/Alex-dev-sys/purge-memory-preview/releases"><b>Download a preview</b></a>
-    · <a href="#memory">Memory</a>
-    · <a href="#build-from-source">Build from source</a>
+    <a href="https://github.com/Alex-dev-sys/purge-memory-preview/releases"><strong>Скачать для macOS →</strong></a>
+    &nbsp; · &nbsp;
+    <a href="#install">Установка</a>
+    &nbsp; · &nbsp;
+    <a href="#memory">Память</a>
+    &nbsp; · &nbsp;
+    <a href="#build-from-source">Сборка из исходников</a>
   </p>
-  <a href="https://github.com/Alex-dev-sys/purge-memory-preview/actions/workflows/memory-preview.yml"><img src="https://img.shields.io/github/actions/workflow/status/Alex-dev-sys/purge-memory-preview/memory-preview.yml?branch=main&label=preview" alt="Preview build status" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license" /></a>
+  <p>
+    <a href="https://github.com/Alex-dev-sys/purge-memory-preview/actions/workflows/memory-preview.yml"><img src="https://img.shields.io/github/actions/workflow/status/Alex-dev-sys/purge-memory-preview/memory-preview.yml?branch=main&amp;label=preview&amp;style=flat-square" alt="Статус сборки preview" /></a>
+    <img src="https://img.shields.io/badge/macOS-13%2B-087CF0?style=flat-square" alt="macOS 13 и новее" />
+    <img src="https://img.shields.io/badge/Apple_silicon_%2B_Intel-универсальная_сборка-233B56?style=flat-square" alt="Поддержка Apple silicon и Intel" />
+    <a href="LICENSE"><img src="https://img.shields.io/badge/лицензия-MIT-233B56?style=flat-square" alt="Лицензия MIT" /></a>
+  </p>
+  <p><strong>Русский</strong> · <a href="README.zh-CN.md">简体中文</a></p>
 </div>
 
-This is the Memory Preview fork of [Purge](https://github.com/jithin-sabu/purge-app). It combines the original disk cleanup tools with a Memory page, Russian and English language selection, and preview releases built on GitHub Actions.
+---
 
-Preview downloads use a separate app identifier and separate settings, data and helper names from the upstream app. They are ad-hoc signed, are not notarized, and do not use the upstream Sparkle update feed. Install updates from this repository's [Releases](https://github.com/Alex-dev-sys/purge-memory-preview/releases) page.
+**Purge Memory Preview** — форк [Purge](https://github.com/jithin-sabu/purge-app) с разделом оперативной памяти, русским интерфейсом и предварительными сборками через GitHub Actions. Нативное приложение на Swift и SwiftUI; сканирование и обработка данных выполняются на вашем Mac.
 
-## Install
+## Что умеет Purge
 
-1. Open [Releases](https://github.com/Alex-dev-sys/purge-memory-preview/releases) and download a `Purge-Memory-Preview-…dmg` from a completed prerelease. Each DMG supports Apple silicon and Intel Macs.
-2. Open the DMG and drag **Purge Memory Preview** into **Applications**.
-3. Open the app. macOS may require you to approve an app distributed outside the App Store.
-4. Grant **Full Disk Access** if you want the scans that need it. Without access, Purge still offers limited scans and explains which locations it cannot read.
+| Раздел | Возможности |
+| --- | --- |
+| **Обзор** | Занятое и свободное место, распределение по категориям и карта прочих данных, доступная только для просмотра. |
+| **Кэши приложений** | Кэши, логи, отчёты о сбоях и поддерживаемые системные остатки — с объяснениями и оценкой безопасности. |
+| **Разработка** | Кэши инструментов, папки сборки и зависимостей, неиспользуемые симуляторы и их среды выполнения. Активные проекты и зарегистрированные Git worktree защищены. |
+| **Большие файлы** | Поиск и фильтры, локальные AI-модели, виртуальные машины, поиск дубликатов по содержимому, Quick Look и открытие в Finder. |
+| **Удаление приложений** | Приложения, связанные файлы, остатки удалённых программ и инструменты командной строки — с предварительным просмотром. |
+| **Память** | Оценка использования RAM, приложения вместе со вспомогательными процессами, очистка файлового кэша и история действий. |
 
-To check the downloaded file, save the release's `SHA256SUMS.txt` beside the DMG and run:
+<a id="install"></a>
+
+## Установка
+
+1. Откройте [страницу релизов](https://github.com/Alex-dev-sys/purge-memory-preview/releases) и скачайте `Purge-Memory-Preview-…dmg` из завершённого предварительного выпуска. Один образ подходит для **Apple silicon и Intel**.
+2. Перетащите **Purge Memory Preview** в **Программы** и запустите приложение.
+3. Если macOS запросит подтверждение открытия приложения вне App Store, подтвердите запуск.
+4. При необходимости предоставьте **полный доступ к диску**. Без него доступны ограниченные проверки; приложение показывает, какие места не удалось прочитать.
+
+> [!NOTE]
+> Это предварительная версия с временной подписью, без нотариального заверения Apple. Она использует отдельные идентификаторы, настройки, данные и имена вспомогательных служб. Обновления устанавливаются из релизов этого репозитория; upstream-обновлятор Sparkle отключён. Homebrew-пакет оригинального Purge устанавливает другую версию приложения.
+
+<details>
+<summary><strong>Как проверить скачанный файл</strong></summary>
+
+Сохраните `SHA256SUMS.txt` рядом с DMG и выполните:
 
 ```bash
 cd ~/Downloads
 shasum -a 256 -c SHA256SUMS.txt
 ```
 
-An `OK` result confirms that the file matches the checksum published with that release. The upstream Homebrew cask installs upstream Purge, not this preview.
+Результат `OK` подтверждает совпадение файла с опубликованной контрольной суммой.
 
-## Language
+</details>
 
-Open **Settings → General → Language** and choose **English**, **Русский**, or **System language**. Click **Restart Purge** to apply the choice throughout the app. Restart is unavailable during a cleanup or process action.
+### Русский интерфейс
 
-Russian text covers the interface, safety explanations, Finder/Siri actions and plural forms. Simplified Chinese is also available through the system-language option. Language selection affects this app, not the macOS language.
+Откройте **Настройки → Основные → Язык**, выберите **Русский** и нажмите **Перезапустить Purge**. Перезапуск недоступен во время очистки или действия с процессами.
 
-## Memory
+Переведены интерфейс, объяснения безопасности, действия Finder и Siri и формы множественного числа. Можно выбрать английский или язык системы; упрощённый китайский доступен через системный язык. Язык macOS при этом не меняется.
 
-Open **Memory** with **⌘6** to see memory status, estimated RAM usage and a collapsible list of applications grouped with their helper processes. Applications eligible for a confirmed quit request appear first; protected or unavailable groups follow. Name and memory-use sorting apply within those sections.
+<a id="memory"></a>
 
-### Clean memory
+## Память — состояние, приложения и действия
 
-The controls are on the **Memory** page and in **Settings → Memory**. Click **Clean Memory** to ask macOS to release reclaimable file-cache pages through its system `purge` command. Running applications stay open. Their live allocations and wired memory remain under application and macOS control, so this action cannot promise a particular amount of free RAM or reduce usage to a chosen target. Files on disk stay in place. Applications can fill the cache again as they continue working; re-reading uncached files may temporarily be slower.
+Откройте **Память** сочетанием **⌘6**. На странице видны оценка занятой RAM, разбивка по категориям и сворачиваемый список приложений с их вспомогательными процессами. Приложения, которым можно отправить подтверждённый запрос завершения, показаны первыми. В каждой группе доступна сортировка по имени или памяти.
 
-Memory cleanup uses an optional, dedicated system service. Enabling that service requires approval in the native macOS administrator dialog. Purge does not store your password. The service runs only the fixed memory-cleanup command; it does not accept a shell command or arbitrary command-line arguments from the app.
+**Очистить память** просит macOS освободить доступные для сброса страницы файлового кэша через системную команду `purge`. Работающие приложения остаются открытыми; файлы на диске сохраняются. Для этой функции используется отдельная служба: её включение требует подтверждения в штатном окне администратора. Пароль не сохраняется; служба выполняет только фиксированную команду очистки.
 
-After a cleanup, the app compares free-RAM samples taken before and after the request. The result is an **observed increase in free memory**, not an exact count of bytes reclaimed by `purge`: other applications can allocate or release memory during the same interval. A completed request may show **no measured increase**. When no valid before/after sample pair is available, the app reports that the change could not be measured instead of showing a reclaimed amount. Results are recorded in **Memory history**.
+> [!IMPORTANT]
+> macOS сама управляет RAM. Малое количество свободной памяти само по себе не означает проблему. Очистка файлового кэша не освобождает живые выделения приложений и не снижает использование RAM до заданного процента. Кэш может заполниться снова, а повторное чтение файлов — временно замедлиться.
 
-### Automatic cleanup
+После очистки Purge сравнивает свободную память до и после запроса и сохраняет результат в **истории памяти**. Это наблюдаемое изменение: другие приложения в тот же момент тоже могут выделять и освобождать RAM. Если прироста нет или замеры нельзя сопоставить, приложение сообщает об этом без выдуманного количества освобождённых байтов.
 
-Automatic memory cleanup starts **off**. The initial timer interval is 30 minutes; the initial usage threshold is 85%. Choose a trigger in the Memory settings:
+### Автоочистка — по вашему выбору
 
-| Trigger | Options | When it runs |
+По умолчанию автоочистка **выключена**. Настройки находятся в **Настройки → Память**.
+
+| Режим | Доступные значения | Условие запуска |
 | --- | --- | --- |
-| **Timer** | Every 5, 15, 30 or 60 minutes | After the selected interval, while Purge is running and available for cleanup. |
-| **RAM usage** | 70%, 80%, 85%, 90% or 95% | When estimated used RAM stays at or above the selected percentage for 30 seconds. |
+| **По таймеру** | 5, 15, 30 или 60 минут | После выбранного интервала, пока Purge запущен и доступен для очистки. |
+| **По использованию RAM** | 70%, 80%, 85%, 90% или 95% | Оценка занятой памяти удерживается не ниже порога 30 секунд. |
 
-The percentage is a trigger for a cache-release attempt, not a target to which RAM will be reduced. The used-RAM estimate counts app, wired and compressed memory; releasing file caches can increase free RAM while that percentage remains high.
+Начальные значения — **30 минут** и **85%**. Процент задаёт условие попытки очистки, а не целевое использование RAM после неё.
 
-Automatic requests are separated by at least five minutes. For a usage trigger to re-arm, usage must first fall five percentage points below the selected threshold. The system service also rejects requests made less than 60 seconds apart. These limits prevent a busy Mac from repeatedly clearing a cache it is immediately rebuilding.
+<details>
+<summary><strong>Интервалы, сон и ограничения автоматических действий</strong></summary>
 
-The manual button is disabled during a disk cleanup or process action; automatic requests are deferred. Automatic cleanup runs only while Purge is running and pauses during sleep. To keep it available after closing the window, enable **Keep Purge in the menu bar**. Quitting Purge stops automatic requests; a schedule does not launch the app or run a cleanup on its own.
+Между автоматическими попытками проходит не менее пяти минут. Повторное срабатывание по RAM возможно после снижения использования на пять процентных пунктов ниже порога. Системная служба дополнительно отклоняет запросы с интервалом менее 60 секунд.
 
-### Readings and process actions
+Во время очистки диска или действия с процессами ручная очистка памяти недоступна, а автоматическая откладывается. На время сна автоматические попытки приостанавливаются. Чтобы оставить функцию доступной после закрытия окна, включите **Оставлять Purge в строке меню**. После выхода из приложения запросы прекращаются: расписание не запускает Purge самостоятельно.
 
-Physical RAM categories and process footprints are different estimates. Neither is an exact per-app share of the system's used-memory figure. macOS manages RAM automatically; a low free-memory figure alone does not mean the Mac is unhealthy. When macOS has not supplied a memory-status event, the page keeps the status badge hidden rather than labelling it Normal.
+Оценка занятой RAM включает память приложений, системную неперемещаемую память и сжатую память. Поэтому освобождение файлового кэша может увеличить свободную память без заметного изменения этого процента.
 
-**Quit** and **Force Quit** are separate, confirmed process actions. They apply only to recognized user applications and protect system processes, Purge and its helpers, excluded apps and targets that fail identity checks. A normal quit is never silently escalated to Force Quit. Memory cleanup does not use either process action. History and exclusions stay on the Mac.
+</details>
 
-In **Settings → Memory**, choose a one- or two-second aggregate refresh interval, enable the optional menu-bar indicator, or request notifications for sustained Warning or Critical memory status. Notifications wait for 60 seconds at the selected level and require macOS notification permission. The menu indicator and notifications start off. Process details refresh every five seconds while the Memory page is visible; background process polling is off.
+<details>
+<summary><strong>Обновление показателей, уведомления и завершение приложений</strong></summary>
 
-## Disk tools
+Общие показатели обновляются раз в одну или две секунды. Подробности процессов — раз в пять секунд, пока страница памяти активна, окно видно и список раскрыт. В фоне и при свёрнутом списке регулярного опроса процессов нет. Можно отдельно включить индикатор в строке меню и уведомления о длительном повышенном или критическом давлении на память; обе функции изначально выключены.
 
-| Area | What it provides |
+Уведомление требует разрешения macOS и отправляется после 60 секунд выбранного уровня давления. Если macOS ещё не сообщила состояние памяти, индикатор состояния скрыт. Общесистемные категории RAM и оценка памяти группы процессов — разные показатели; их нельзя считать точными долями одного и того же числа.
+
+**Завершить** и **Принудительно завершить** — отдельные действия с подтверждением. Они доступны только для распознанных пользовательских приложений. Системные процессы, сам Purge и его помощники, исключённые приложения и цели, не прошедшие проверку идентичности, защищены. Обычное завершение не превращается в принудительное автоматически. Эти действия не используются при очистке памяти; принудительное завершение может привести к потере несохранённой работы.
+
+</details>
+
+<a id="disk-tools"></a>
+
+## Очистка диска с понятными границами
+
+Кнопка **Безопасная очистка** объединяет подходящие результаты из кэшей приложений и инструментов разработки. Для диска также можно настроить отдельное расписание.
+
+| Метка | Как с ней работать |
 | --- | --- |
-| **Overview** | Used, free and total disk space; category totals; a read-only map of uncategorized space. |
-| **App Caches** | Known application caches, logs, crash reports and supported system leftovers, with explanations and safety labels. |
-| **Dev Tools** | Global developer caches, project build/dependency folders, unused simulators and simulator runtimes. Active projects and registered Git worktrees are protected. |
-| **Large Files** | Search and filters for personal files, local AI models and virtual machines; byte-for-byte duplicate detection; Quick Look and Finder actions. |
-| **App Uninstaller** | Installed apps, associated support files, leftovers from removed apps and command-line tools, with a review before removal. |
+| **Безопасно очистить** | Подходящие элементы могут участвовать в безопасной и плановой очистке. |
+| **Сначала проверить** | Посмотрите описание и содержимое перед выбором действия. Автоматическая безопасная очистка их пропускает. |
+| **Неизвестно** | Может встречаться в подтверждении удаления; требует отдельной проверки. |
 
-**Clean Safe Items** combines eligible App Caches and Dev Tools results. **Check First** and **Not Sure** items require review. Disk cleanup can also run on an optional schedule, separately from Memory settings.
+Большие файлы считаются личными данными и **не участвуют в автоматической безопасной очистке**. Действие **Оставить только в iCloud** отдельно убирает локальную копию полностью синхронизированного файла, сохраняя его в iCloud, и требует предварительного просмотра.
 
-Large Files are personal files, not caches. They are not part of an automatic safe cleanup. **Keep Only in iCloud** removes a fully synced file's downloaded copy from this Mac while keeping the iCloud file; it is a separate, reviewed action.
+На поддерживаемых Mac в обзоре доступны локальные снимки Time Machine и управление моделями Apple Intelligence. Удаление моделей требует **macOS 27 и Apple silicon**; повторная загрузка запрашивает у службы Apple те наборы, которые удалил Purge.
 
-On supported Macs, the Overview also offers Time Machine local snapshot management and Apple Intelligence model management. Model removal requires macOS 27 and Apple silicon; downloading again asks Apple's service for the model sets Purge removed.
+<details>
+<summary><strong>Что можно восстановить и какие действия обходят корзину</strong></summary>
 
-### What can be restored
+По умолчанию файлы и папки перемещаются в **Корзину**. Purge не очищает её; пока вы не сделали это сами, файлы можно восстановить.
 
-Files and folders move to the **Trash** by default. Purge does not empty it. You can restore those files until you empty the Trash yourself.
+Некоторые действия выполняет другая система или программа, и корзина не используется:
 
-Some actions use another system or app's removal mechanism and do not use the Trash:
+| Объект | Способ удаления |
+| --- | --- |
+| Симуляторы iOS и среды выполнения | Через `simctl` из Xcode. |
+| Локальные снимки Time Machine | Через `tmutil`. Самый новый снимок и последний снимок из резервного копирования сохраняются. |
+| Модели Apple Intelligence | Через службу ресурсов Apple; модели можно загрузить повторно. |
+| Инструменты командной строки и приложения Homebrew cask | Через пакетный менеджер, если вы выбрали этот вариант в окне проверки. |
 
-- iOS simulators and simulator runtimes are removed through Xcode's `simctl`.
-- Time Machine local snapshots are removed through `tmutil`; the newest snapshot and the one from the last backup are kept.
-- Apple Intelligence models are released through Apple's asset service and can be downloaded again.
-- Command-line tools and Homebrew cask apps are deleted by their package manager when you choose that option in the review.
+Удаление симуляторов, их сред, снимков и программ через пакетный менеджер не переносит их в корзину. Последствия описаны в подтверждении. Папка данных Docker Desktop перемещается в корзину; команда `docker system prune` не запускается.
 
-The confirmation sheet describes the action before it runs. Docker Desktop's data folder goes to the Trash; Purge does not run `docker system prune`.
+</details>
 
-## Build from source
+<a id="performance"></a>
 
-You need macOS 13 or later and Xcode 26 or later. Xcode 26 supplies the Swift 6.2 features used by the project. Node.js and Python 3 are needed for the repository checks; npm dependencies are only needed to regenerate the checked-in brand icons.
+## Меньше лишней работы
 
-Use a separate checkout for a preview build: the configuration script changes the checkout's identifiers, helper filenames and URL scheme, and disables Sparkle updates.
+Обновления больших списков объединяются, сортировка вынесена с главного потока, а запущенные процессы измерения размеров можно отменить. Мониторинг процессов останавливается при сворачивании списка; выключенная автоочистка не держит активный таймер.
+
+| Обработка 10 000 результатов Large Files | До | После |
+| --- | ---: | ---: |
+| Время | 738 мс | **215 мс** |
+| Процессорное время | 825 мс | **302 мс** |
+| Публикации списка | 403 | **4** |
+
+Это медианы пяти повторов в Release на **Apple M1, 8 ГБ RAM**. Измерялась обработка одинаковых готовых результатов без обхода диска и отрисовки интерфейса. Эти цифры не означают ускорение всего сканирования в том же отношении. Устойчивое снижение потребления RAM и CPU в простое не установлено.
+
+[Методика, ограничения и исходные измерения →](docs/benchmarks/2026-11-10/README.md)
+
+<a id="build-from-source"></a>
+
+## Для разработчиков
+
+**Требования:** macOS 13+, Xcode 26+ с возможностями Swift 6.2, Python 3 и Node.js для проверок репозитория. Зависимости npm нужны только для пересборки иконок сторонних брендов.
+
+<details>
+<summary><strong>Собрать и запустить локальную preview-версию</strong></summary>
+
+Используйте отдельную копию репозитория: скрипт конфигурации меняет идентификаторы приложения и помощников, имена их файлов и URL-схему, а также отключает Sparkle-обновления.
 
 ```bash
 git clone https://github.com/Alex-dev-sys/purge-memory-preview.git
@@ -128,18 +195,23 @@ xcodebuild build \
 open build/local/Build/Products/Debug/Purge.app
 ```
 
-Swift Package Manager downloads [Sparkle](https://github.com/sparkle-project/Sparkle) on the first build. It remains linked in the preview, but its updater is disabled. Preview builds disable Hardened Runtime because an ad-hoc app identity cannot match Sparkle's Developer ID signature; the release workflow checks that the finished app actually launches.
+Для оптимизированной сборки замените `Debug` на `Release` в параметре конфигурации и пути запуска.
 
-### Checks and tests
+При первой сборке Swift Package Manager загружает [Sparkle](https://github.com/sparkle-project/Sparkle). Фреймворк остаётся связан с preview-приложением, но обновлятор отключён. В этих сборках Hardened Runtime выключен: временная подпись приложения не совпадает с Developer ID фреймворка. Работоспособность готового приложения проверяется запуском в release-workflow.
 
-Run the source checks:
+</details>
+
+<details>
+<summary><strong>Проверки и тесты</strong></summary>
+
+Проверки исходников:
 
 ```bash
 node scripts/lint-design-tokens.mjs
 python3 scripts/check-localization.py
 ```
 
-Run the main test suite with ad-hoc signing:
+Основной набор тестов с временной подписью:
 
 ```bash
 xcodebuild test \
@@ -155,35 +227,80 @@ xcodebuild test \
   CODE_SIGNING_ALLOWED=YES
 ```
 
-Run the two stress suites separately with the same project, scheme, destination and derived-data path, using `test-without-building` and either `-only-testing:PurgeTests/ProcessRunnerTests` or `-only-testing:PurgeTests/FolderSizingConcurrencyTests`. CI uses this split so their worker-pool stress does not interfere with unrelated asynchronous tests.
+Два стресс-набора запускайте отдельно, используя уже собранный тестовый хост:
 
-The optional Apple Intelligence language-alias integration test requires `PURGE_SYSTEM_INTEGRATION_TESTS=1` on a Mac with the corresponding assets installed. Regular alias-resolution tests use fixtures.
+```bash
+for suite in ProcessRunnerTests FolderSizingConcurrencyTests; do
+  xcodebuild test-without-building \
+    -project purge.xcodeproj \
+    -scheme purge \
+    -destination 'platform=macOS' \
+    -derivedDataPath build/tests \
+    -parallel-testing-enabled NO \
+    "-only-testing:PurgeTests/$suite" \
+    CODE_SIGN_IDENTITY=- \
+    CODE_SIGNING_REQUIRED=YES \
+    CODE_SIGNING_ALLOWED=YES
+done
+```
 
-To regenerate brand icons:
+Так же устроен CI: нагрузка на пул рабочих потоков в стресс-тестах не мешает другим асинхронным проверкам. Необязательный интеграционный тест языковых алиасов Apple Intelligence запускается с `PURGE_SYSTEM_INTEGRATION_TESTS=1` на Mac с установленными ресурсами. Обычные тесты используют подготовленные данные.
+
+</details>
+
+<details>
+<summary><strong>Иконки и воспроизведение замеров</strong></summary>
+
+Иконка приложения хранится в нативном векторном формате `purge.icon`. Перегенерировать превью README и значок DMG с размерами до 1024×1024:
+
+```bash
+python3 scripts/render-app-icon.py
+```
+
+Пересобрать иконки сторонних брендов:
 
 ```bash
 npm ci
 npm run generate:icons
 ```
 
-### GitHub releases
+Повторить сравнение оптимизаций с исходной версией:
 
-A push to `main`, or a manual **Memory preview** workflow run on `main`, starts tests and universal Release packaging in parallel. Publication waits for both jobs to pass. The workflow verifies signatures, checks both architectures, launches the app, creates a DMG and publishes it with `SHA256SUMS.txt`. The same files are kept as an Actions artifact.
+```bash
+python3 scripts/benchmarks/run.py --baseline 449b3f0fa300a667b271ce6202e9e84273b65a49
+```
 
-Xcode products, compiler modules and Swift packages are cached per Xcode version. Source timestamps are restored only when their content hash matches the cached file, allowing unchanged files to reuse compiler outputs. Stress suites reuse their test build. A newer push cancels an older preview workflow for the same branch.
+[Описание сценариев и артефактов замера](scripts/benchmarks/README.md).
 
-## Privacy and safety
+</details>
 
-Scans, memory samples, exclusions, settings and histories are handled locally. No file contents or memory samples are sent to an AI service. Duplicate detection compares files on the Mac. Preview builds do not contact the upstream Sparkle update feed. Explicit download actions, such as fetching Apple Intelligence models again, use their owning service.
+<details>
+<summary><strong>Как публикуются сборки</strong></summary>
 
-Disk removal is constrained by allowlists and protected paths. The read-only Everything Else map does not remove files. Memory actions have their own process-identity checks and exclusions. See [SECURITY.md](SECURITY.md) for the underlying project's security model and reporting guidance; signing and update claims for upstream releases do not describe these ad-hoc preview builds.
+Push в `main` или ручной запуск **Memory preview** для `main` запускает тесты и сборку универсальной Release-версии параллельно. Публикация ждёт успешного завершения обеих задач. Workflow проверяет подписи и обе архитектуры, запускает приложение, создаёт DMG и публикует его вместе с `SHA256SUMS.txt`. Те же файлы сохраняются в артефактах Actions.
 
-## Uninstall
+Продукты Xcode, модули компилятора и Swift-пакеты кэшируются с учётом версии Xcode. Время изменения исходников восстанавливается только при совпадении хеша содержимого. Стресс-тесты переиспользуют сборку тестового хоста. Новый push отменяет более старый preview-workflow той же ветки.
 
-Use **Uninstall Purge…** in the app menu or Settings to review and remove the app's background components before it moves itself to the Trash. This turns off automatic memory cleanup and includes removal of its dedicated system service; approve the macOS administrator dialog when asked. Settings and history are kept unless you also select their removal. Full Disk Access must be removed separately in macOS System Settings.
+</details>
 
-If you plan to remove the app directly in Finder, first open the information button (ⓘ) beside **Memory cleaning**, then choose **Remove memory cleaning permission** and approve removal of the service. Dragging the app to the Trash does not remove a separately installed system service.
+<a id="privacy-and-safety"></a>
 
-## Project and license
+## Данные остаются на вашем Mac
 
-This fork is based on [jithin-sabu/purge-app](https://github.com/jithin-sabu/purge-app), created by Jithin Sabu. The app and this fork are released under the [MIT License](LICENSE). See [CONTRIBUTING.md](CONTRIBUTING.md) for repository guidance.
+Сканирования, показатели памяти, исключения, настройки и история обрабатываются локально. Содержимое файлов и замеры памяти не отправляются в AI-сервисы. Сравнение дубликатов также выполняется на Mac. Отдельные действия загрузки, например повторное получение моделей Apple Intelligence, обращаются к соответствующей службе.
+
+Удаление ограничено списками разрешённых путей и защитными проверками. Карта прочих данных доступна только для просмотра. Действия с памятью дополнительно проверяют идентичность процессов и исключения. Подробнее — в [SECURITY.md](SECURITY.md); утверждения этого документа о подписи и обновлениях оригинального Purge не описывают временно подписанные preview-сборки.
+
+<a id="uninstall"></a>
+
+## Удаление приложения
+
+Выберите **Удалить Purge…** в меню приложения или настройках. Purge предложит отключить фоновые компоненты и автоочистку, удалить отдельную службу очистки памяти с подтверждением администратора, затем переместить приложение в корзину. Настройки и история сохраняются, если вы отдельно не выбрали их удаление. Полный доступ к диску отзывается вручную в системных настройках macOS.
+
+Если удаляете приложение через Finder, сначала нажмите **ⓘ** рядом с **Очистка оперативной памяти**, выберите **Отключить службу очистки памяти** и подтвердите действие. Перемещение приложения в корзину само по себе не удаляет отдельно установленную системную службу.
+
+---
+
+Основано на [Purge](https://github.com/jithin-sabu/purge-app), созданном **Jithin Sabu**. Оригинальный проект и этот форк распространяются по [лицензии MIT](LICENSE).
+
+[Скачать preview](https://github.com/Alex-dev-sys/purge-memory-preview/releases) · [Сообщить об ошибке](https://github.com/Alex-dev-sys/purge-memory-preview/issues) · [Участие в разработке](CONTRIBUTING.md)

@@ -2,7 +2,7 @@
   <img src="Assets/purge-iOS-Default-1024x1024@1x.png" width="112" alt="Purge 应用图标" />
   <h1>Purge Memory Preview</h1>
   <p>用于查看磁盘占用和管理内存的原生 macOS 应用。</p>
-  <p><a href="README.md">English</a> · 简体中文</p>
+  <p><a href="README.md">Русский</a> · 简体中文</p>
   <p>
     <a href="https://github.com/Alex-dev-sys/purge-memory-preview/releases"><b>下载预览版</b></a>
     · <a href="#内存">内存</a>

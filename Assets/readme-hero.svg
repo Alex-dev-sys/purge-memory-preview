@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="440" viewBox="0 0 1280 440" role="img" aria-labelledby="title description">
+  <title id="title">Purge Memory Preview</title>
+  <desc id="description">Порядок на диске. Контроль над памятью. Нативное приложение для macOS.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1280" y2="440" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#091522"/>
+      <stop offset="1" stop-color="#103E76"/>
+    </linearGradient>
+    <linearGradient id="icon" x1="64" y1="46" x2="128" y2="110" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#46ADFF"/>
+      <stop offset="1" stop-color="#087CF0"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="440" rx="28" fill="url(#background)"/>
+  <circle cx="1230" cy="85" r="270" fill="#258BFF" opacity=".07"/>
+  <circle cx="1230" cy="85" r="205" fill="none" stroke="#84BEFF" stroke-opacity=".09"/>
+  <circle cx="1230" cy="85" r="335" fill="none" stroke="#84BEFF" stroke-opacity=".06"/>
+  <rect x="64" y="46" width="64" height="64" rx="16" fill="url(#icon)"/>
+  <path transform="translate(76 55) scale(.078)" fill-rule="evenodd" d="M0 583V0H302C444 0 517 77 517 222C517 367 444 444 302 444H180V583H0ZM180 156V288H283C322 288 342 266 342 222C342 178 322 156 283 156H180Z" fill="#FFF"/>
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif">
+    <text x="148" y="77" font-size="28" font-weight="650" fill="#FFF">Purge</text>
+    <text x="148" y="101" font-size="15" letter-spacing="1.5" fill="#A4C4E8">MEMORY PREVIEW</text>
+    <text x="64" y="211" font-size="60" font-weight="700" letter-spacing="-1.5" fill="#FFF">Порядок на диске.</text>
+    <text x="64" y="282" font-size="60" font-weight="700" letter-spacing="-1.5" fill="#FFF">Контроль над памятью.</text>
+    <text x="66" y="333" font-size="22" fill="#BDD1E7">Кэши, большие файлы и оперативная память — в одном приложении.</text>
+    <text x="66" y="394" font-size="16" fill="#8FAFCE">Нативно для macOS</text>
+    <circle cx="255" cy="389" r="2" fill="#6D94BC"/>
+    <text x="275" y="394" font-size="16" fill="#8FAFCE">Swift + SwiftUI</text>
+    <circle cx="408" cy="389" r="2" fill="#6D94BC"/>
+    <text x="428" y="394" font-size="16" fill="#8FAFCE">Локальная обработка данных</text>
+  </g>
+</svg>
