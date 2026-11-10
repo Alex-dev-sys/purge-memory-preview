@@ -135,3 +135,24 @@
 "Memory cleaning timed out. Try again later." = "Memory cleaning timed out. Try again later.";
 "macOS could not release its file cache. No applications were closed." = "macOS could not release its file cache. No applications were closed.";
 "Wait a minute before cleaning memory again." = "Wait a minute before cleaning memory again.";
+
+/* Memory page presentation. */
+"of %@ RAM" = "of %@ RAM";
+"About memory readings" = "About memory readings";
+"Memory activity" = "Memory activity";
+"Applications" = "Applications";
+"System" = "System";
+"Wired memory reserved by macOS." = "Wired memory reserved by macOS.";
+"File cache" = "File cache";
+"Swap" = "Swap";
+"Free up reclaimable cache." = "Free up reclaimable cache.";
+"Administrator approval on first use" = "Administrator approval on first use";
+"Auto-clean" = "Auto-clean";
+"Above the threshold for 30 seconds" = "Above the threshold for 30 seconds";
+"Manual cleaning only" = "Manual cleaning only";
+"At %@ RAM usage" = "At %@ RAM usage";
+"How memory cleaning works" = "How memory cleaning works";
+"Search applications" = "Search applications";
+"Selected: %@" = "Selected: %@";
+"Used memory" = "Used memory";
+"of %@" = "of %@";

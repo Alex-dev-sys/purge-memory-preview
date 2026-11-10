@@ -135,3 +135,24 @@
 "Memory cleaning timed out. Try again later." = "内存清理超时，请稍后重试。";
 "macOS could not release its file cache. No applications were closed." = "macOS 未能释放文件缓存，未关闭任何应用。";
 "Wait a minute before cleaning memory again." = "请等待一分钟后再清理内存。";
+
+/* Memory page presentation. */
+"of %@ RAM" = "共 %@ RAM";
+"About memory readings" = "关于内存读数";
+"Memory activity" = "内存使用情况";
+"Applications" = "应用";
+"System" = "系统";
+"Wired memory reserved by macOS." = "macOS 保留的联动内存。";
+"File cache" = "文件缓存";
+"Swap" = "交换空间";
+"Free up reclaimable cache." = "释放可回收的系统文件缓存。";
+"Administrator approval on first use" = "首次使用需管理员授权";
+"Auto-clean" = "自动清理";
+"Above the threshold for 30 seconds" = "持续超过阈值 30 秒后清理";
+"Manual cleaning only" = "仅手动清理";
+"At %@ RAM usage" = "RAM 占用达到 %@ 时";
+"How memory cleaning works" = "内存清理的工作方式";
+"Search applications" = "搜索应用";
+"Selected: %@" = "已选：%@";
+"Used memory" = "已使用内存";
+"of %@" = "共 %@";

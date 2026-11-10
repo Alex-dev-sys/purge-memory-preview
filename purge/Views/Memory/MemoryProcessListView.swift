@@ -23,21 +23,31 @@ struct MemoryProcessListView: View {
     @State private var sortByName = false
     @State private var selected: Set<MemoryGroupIdentity> = []
     @State private var confirmation: MemoryConfirmation?
-    @FocusState private var searchFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppStyle.Spacing.small) {
-            HStack {
-                TextField(memoryText("Search applications or bundle identifiers"), text: $search)
-                    .textFieldStyle(.roundedBorder).focused($searchFocused)
-                Picker(memoryText("Sort"), selection: $sortByName) {
-                    Text(memoryText("Memory use")).tag(false)
-                    Text(memoryText("Name")).tag(true)
-                }.frame(maxWidth: 170)
-                Button(memoryText("Quit selected")) { prepare(action: .quit) }
-                    .buttonStyle(.purge(.secondary)).disabled(selected.isEmpty || actions.isBusy || source.unavailable)
-                Button(memoryText("Force Quit selected")) { prepare(action: .forceQuit) }
-                    .buttonStyle(.purge(.secondary)).disabled(selected.isEmpty || actions.isBusy || source.unavailable)
+            HStack(spacing: AppStyle.Spacing.xSmall) {
+                CapsuleSearchField(query: $search,
+                    prompt: LocalizedStringKey(memoryText("Search applications")),
+                    accessibilityLabel: LocalizedStringKey(memoryText("Search applications or bundle identifiers")),
+                    width: 260)
+                Spacer(minLength: AppStyle.Spacing.small)
+                SettingsMenuPicker(selection: $sortByName, options: [false, true],
+                    optionLabel: { $0 ? memoryText("Name") : memoryText("Memory use") },
+                    accessibilityTitle: memoryText("Sort"))
+            }
+            if !selected.isEmpty {
+                HStack(spacing: AppStyle.Spacing.xSmall) {
+                    Text(memoryText("Selected: \(selected.count.formatted())"))
+                        .font(AppStyle.Typography.callout).foregroundStyle(AppColors.textSecondary)
+                    Spacer(minLength: AppStyle.Spacing.small)
+                    Button(memoryText("Quit")) { prepare(action: .quit) }
+                        .buttonStyle(.purge(.secondary, size: .small))
+                        .disabled(actions.isBusy || source.unavailable)
+                    Button(memoryText("Force Quit")) { prepare(action: .forceQuit) }
+                        .buttonStyle(.purge(.secondary, size: .small))
+                        .disabled(actions.isBusy || source.unavailable)
+                }
             }
             if actions.isBusy {
                 Text(memoryText("An action is running. Further requests are disabled."))
@@ -58,16 +68,22 @@ struct MemoryProcessListView: View {
                 HStack { Text(memoryText("Process sample")); Text(sampled, style: .relative) }
                     .font(AppStyle.Typography.metadata).foregroundStyle(AppColors.textSecondary)
             }
-            LazyVStack(alignment: .leading, spacing: AppStyle.Spacing.xSmall) {
-                ForEach(groups) { group in processRow(group) }
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
+                    if index > 0 {
+                        Rectangle().fill(AppColors.borderSubtle).frame(height: 1)
+                            .padding(.horizontal, AppStyle.Spacing.medium)
+                    }
+                    processRow(group)
+                }
             }
+            .overviewCard()
             if source.sample == nil && !source.unavailable {
                 ProgressView(memoryText("Reading processes…"))
             } else if groups.isEmpty && !source.unavailable {
                 Text(memoryText("No matching processes.")).font(AppStyle.Typography.body)
             }
         }
-        .focusedSceneValue(\.findAction, FindAction { searchFocused = true })
         .onChange(of: source.sample?.sampledAt) { _ in
             selected.formIntersection(Set((source.sample?.groups ?? []).map(\.id)))
         }
@@ -128,20 +144,27 @@ struct MemoryProcessListView: View {
                         .frame(width: AppStyle.Row.listIconFrameSize, height: AppStyle.Row.listIconFrameSize)
                 } else { Image(systemName: "gearshape").frame(width: AppStyle.Row.listIconFrameSize) }
                 VStack(alignment: .leading, spacing: AppStyle.Spacing.xxxSmall) {
-                    Text(group.title).font(AppStyle.Typography.rowTitle)
+                    Text(group.title).font(AppStyle.Typography.rowTitle).lineLimit(1)
                     Text(safety.title).font(AppStyle.Typography.metadata)
-                        .foregroundStyle(safety == .protected ? AppColors.textSecondary : AppColors.statusCheckText)
+                        .foregroundStyle(safety == .protected ? AppColors.textSecondary
+                                         : safety == .safe ? AppColors.statusSafeText : AppColors.statusCheckText)
                 }
                 Spacer()
-                Text(MemoryFormat.bytes(group.footprint)).font(AppStyle.Typography.body.numbers).monospacedDigit()
+                Text(MemoryFormat.bytes(group.footprint)).font(AppStyle.Typography.headline.numbers).monospacedDigit()
+                    .frame(minWidth: 72, alignment: .trailing)
                 if let footprint = group.footprint, let total, total > 0 {
                     Text((Double(footprint) / Double(total)).formatted(.percent.precision(.fractionLength(1))))
                         .font(AppStyle.Typography.metadata.numbers).foregroundStyle(AppColors.textSecondary)
+                        .frame(width: 52, alignment: .trailing)
+                } else {
+                    Text(verbatim: "—").font(AppStyle.Typography.metadata.numbers)
+                        .foregroundStyle(AppColors.textTertiary)
+                        .frame(width: 52, alignment: .trailing)
                 }
             }
         }
-        .padding(AppStyle.Spacing.small)
-        .background(AppColors.surfaceCard, in: RoundedRectangle(cornerRadius: AppStyle.Radius.md))
+        .padding(.horizontal, AppStyle.Spacing.medium)
+        .padding(.vertical, AppStyle.Spacing.small)
         .contextMenu {
             if let bundle = group.bundleID {
                 Button(memoryText("Exclude from Memory actions")) { settings.exclude(bundle); selected.remove(group.id) }

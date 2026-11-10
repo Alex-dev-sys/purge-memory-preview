@@ -37,7 +37,7 @@
 "Force Quit" = "Завершить принудительно";
 "Force Quit can permanently lose unsaved changes. It is separate from normal Quit." = "Принудительное завершение может безвозвратно удалить несохранённые изменения. Это отдельное действие.";
 "Force Quit selected" = "Принудительно завершить выбранные";
-"Free" = "Свободная";
+"Free" = "Свободно";
 "Graph range" = "Период графика";
 "Has not quit" = "Не завершено";
 "History is unavailable. The existing archive was preserved; monitoring can continue." = "История недоступна. Существующий архив сохранён; наблюдение продолжается.";
@@ -135,3 +135,24 @@
 "Memory cleaning timed out. Try again later." = "Время ожидания очистки истекло. Повторите позже.";
 "macOS could not release its file cache. No applications were closed." = "macOS не смогла освободить файловый кэш. Приложения не закрывались.";
 "Wait a minute before cleaning memory again." = "Подождите минуту перед повторной очисткой памяти.";
+
+/* Memory page presentation. */
+"of %@ RAM" = "из %@ RAM";
+"About memory readings" = "О показателях памяти";
+"Memory activity" = "Использование памяти";
+"Applications" = "Приложения";
+"System" = "Система";
+"Wired memory reserved by macOS." = "Несжимаемая память, зарезервированная macOS.";
+"File cache" = "Кэш файлов";
+"Swap" = "Подкачка";
+"Free up reclaimable cache." = "Освобождение системного файлового кэша.";
+"Administrator approval on first use" = "При первом запуске потребуется разрешение администратора";
+"Auto-clean" = "Автоочистка";
+"Above the threshold for 30 seconds" = "При превышении порога в течение 30 секунд";
+"Manual cleaning only" = "Очистка по нажатию кнопки";
+"At %@ RAM usage" = "При заполнении RAM на %@";
+"How memory cleaning works" = "Как работает очистка памяти";
+"Search applications" = "Поиск приложений";
+"Selected: %@" = "Выбрано: %@";
+"Used memory" = "Используется";
+"of %@" = "из %@";

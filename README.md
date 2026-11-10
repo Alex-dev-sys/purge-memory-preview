@@ -182,7 +182,7 @@ Disk removal is constrained by allowlists and protected paths. The read-only Eve
 
 Use **Uninstall Purge…** in the app menu or Settings to review and remove the app's background components before it moves itself to the Trash. This turns off automatic memory cleanup and includes removal of its dedicated system service; approve the macOS administrator dialog when asked. Settings and history are kept unless you also select their removal. Full Disk Access must be removed separately in macOS System Settings.
 
-If you plan to remove the app directly in Finder, first choose **Remove memory cleaning permission** in Memory settings and approve removal of the service. Dragging the app to the Trash does not remove a separately installed system service.
+If you plan to remove the app directly in Finder, first open the information button (ⓘ) beside **Memory cleaning**, then choose **Remove memory cleaning permission** and approve removal of the service. Dragging the app to the Trash does not remove a separately installed system service.
 
 ## Project and license
 
