@@ -1,17 +1,18 @@
 import Foundation
 
 nonisolated enum MemoryAction: String, Codable, Sendable {
-    case quit, forceQuit
+    case quit, forceQuit, clean
     var title: String {
         switch self {
         case .quit: memoryText("Quit")
         case .forceQuit: memoryText("Force Quit")
+        case .clean: memoryText("Clean Memory")
         }
     }
 }
 
 nonisolated enum MemoryActionOutcome: String, Codable, Sendable {
-    case terminated, requestRefused, timedOut, alreadyExited, identityChanged, policySkipped
+    case terminated, requestRefused, timedOut, alreadyExited, identityChanged, policySkipped, cleaned, cleanFailed
     var title: String {
         switch self {
         case .terminated: memoryText("Terminated")
@@ -20,6 +21,8 @@ nonisolated enum MemoryActionOutcome: String, Codable, Sendable {
         case .alreadyExited: memoryText("Already exited")
         case .identityChanged: memoryText("Identity changed")
         case .policySkipped: memoryText("Skipped for safety")
+        case .cleaned: memoryText("Memory cleaning finished")
+        case .cleanFailed: memoryText("Memory cleaning failed")
         }
     }
 }
@@ -46,6 +49,10 @@ nonisolated struct MemoryHistoryEntry: Identifiable, Codable, Sendable {
     let afterDate: Date?
     let accountingVersion: Int
     var reason: MemoryActionReason? = nil
+    var cleanupTrigger: MemoryCleanupTrigger? = nil
+    var beforeFree: Int64? = nil
+    var afterFree: Int64? = nil
+    var cleanupError: String? = nil
 }
 
 nonisolated struct MemoryConfirmation: Identifiable, Sendable {

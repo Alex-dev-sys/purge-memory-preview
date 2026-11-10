@@ -6,6 +6,7 @@ import Foundation
 enum SelfUninstallPart: String, CaseIterable, Sendable {
     case deletedAppsWatcher
     case adminHelper
+    case memoryCleaner
     case finderService
     case cleanupReminder
     case loginItem

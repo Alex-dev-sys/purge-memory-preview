@@ -51,7 +51,7 @@ final class PurgeAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard CleaningQuitGuard.shouldAllowTermination() else { return .terminateCancel }
-        guard AppEnvironment.memory.actions.isBusy else { return .terminateNow }
+        guard AppEnvironment.memory.isBusy else { return .terminateNow }
         Task {
             await AppEnvironment.memory.prepareForExit()
             sender.reply(toApplicationShouldTerminate: true)

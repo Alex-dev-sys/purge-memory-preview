@@ -28,6 +28,7 @@ struct MemoryView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: AppStyle.Spacing.large) {
                 pressureSummary
+                MemoryCleaningControls(cleanup: model.cleanup, settings: model.settings, actions: model.actions)
                 memoryBreakdown
                 chart
                 HStack {

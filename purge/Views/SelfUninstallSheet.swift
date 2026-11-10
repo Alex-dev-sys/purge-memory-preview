@@ -288,6 +288,7 @@ struct SelfUninstallSheet: View {
         switch kind {
         case .part(.deletedAppsWatcher): return String(localized: "Deleted-app watcher")
         case .part(.adminHelper): return String(localized: "Admin helper")
+        case .part(.memoryCleaner): return memoryText("Memory cleaning")
         case .part(.finderService): return String(localized: "Finder right-click item")
         case .part(.cleanupReminder): return String(localized: "Cleanup reminder")
         case .part(.loginItem): return String(localized: "Launch at login")
@@ -300,6 +301,7 @@ struct SelfUninstallSheet: View {
         switch kind {
         case .part(.deletedAppsWatcher): return "eye"
         case .part(.adminHelper): return "key"
+        case .part(.memoryCleaner): return "memorychip"
         case .part(.finderService): return "filemenu.and.selection"
         case .part(.cleanupReminder): return "bell"
         case .part(.loginItem): return "power"
@@ -310,6 +312,7 @@ struct SelfUninstallSheet: View {
 
     static func failureDetail(for kind: SelfUninstaller.StepKind) -> String {
         switch kind {
+        case .part(.memoryCleaner): return String(localized: "Still on")
         case .part(.deletedAppsWatcher), .part(.adminHelper), .part(.loginItem):
             return String(localized: "Still in Login Items")
         case .part(.finderService): return String(localized: "Still in Finder’s menu")
@@ -322,7 +325,7 @@ struct SelfUninstallSheet: View {
     static func isListedInLoginItems(_ kind: SelfUninstaller.StepKind) -> Bool {
         switch kind {
         case .part(.deletedAppsWatcher), .part(.adminHelper), .part(.loginItem): return true
-        case .part(.finderService), .part(.cleanupReminder), .data, .app: return false
+        case .part(.memoryCleaner), .part(.finderService), .part(.cleanupReminder), .data, .app: return false
         }
     }
 

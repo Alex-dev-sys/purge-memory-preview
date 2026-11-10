@@ -101,3 +101,37 @@
 "Warning" = "Повышенное";
 "Wired" = "Зарезервированная системой";
 "macOS manages memory automatically. Free RAM is not a health score." = "macOS управляет памятью автоматически. Свободная память не показатель здоровья системы.";
+
+/* Manual and automatic RAM cleaning. */
+"Clean Memory" = "Очистить память";
+"Memory cleaning" = "Очистка оперативной памяти";
+"Memory cleaning finished" = "Очистка памяти завершена";
+"Memory cleaning failed" = "Не удалось очистить память";
+"Timer" = "По таймеру";
+"RAM usage" = "По заполнению памяти";
+"Manual" = "Вручную";
+"Waiting for approval…" = "Ожидание разрешения…";
+"Cleaning memory…" = "Очистка памяти…";
+"Releases reclaimable system file cache. Applications stay open; their working memory is not cleared." = "Освобождает системный файловый кэш. Приложения остаются открытыми, их рабочая память не очищается.";
+"First use asks for administrator approval to enable a dedicated cache-cleaning service. Your password is not stored." = "При первом использовании macOS запросит разрешение администратора для отдельной службы очистки кэша. Пароль не сохраняется.";
+"Automatic memory cleaning" = "Автоматическая очистка памяти";
+"Clean memory when" = "Когда очищать память";
+"Cleaning interval" = "Интервал очистки";
+"Every %@ minutes" = "Каждые %@ мин.";
+"Next memory cleaning" = "Следующая очистка памяти";
+"Used RAM threshold" = "Порог занятой RAM";
+"The threshold must hold for 30 seconds. After a cleanup, usage must fall 5 percentage points before another threshold cleanup." = "Порог должен быть превышен 30 секунд. Повторное срабатывание возможно после снижения заполнения на 5 процентных пунктов.";
+"Runs while Purge is open, including menu bar mode. Pauses during sleep. Automatic cleanups are at least 5 minutes apart." = "Работает, пока запущен Purge, в том числе в строке меню. Во время сна приостанавливается. Между автоматическими очистками — не менее 5 минут.";
+"macOS controls RAM allocation. A target usage level is not guaranteed; the measured free-RAM change can be zero." = "Распределением RAM управляет macOS. Снижение до заданного уровня не гарантируется; прирост свободной памяти может быть нулевым.";
+"Remove memory cleaning permission" = "Отключить службу очистки памяти";
+"Memory cleaning permission was removed." = "Служба очистки памяти отключена и удалена.";
+"Observed free RAM increase: %@." = "Измеренный прирост свободной RAM: %@.";
+"Cleaning finished. No measurable increase in free RAM was observed." = "Очистка завершена. Измеримого прироста свободной RAM не обнаружено.";
+"Cleaning finished. The change in free RAM could not be measured." = "Очистка завершена. Измерить изменение свободной RAM не удалось.";
+"Free RAM: %@ → %@" = "Свободная RAM: %@ → %@";
+"System file cache" = "Системный файловый кэш";
+"Administrator approval was cancelled or unavailable." = "Разрешение администратора отменено или недоступно.";
+"Enable memory cleaning first. Administrator approval is required once." = "Сначала включите очистку памяти. Потребуется разовое разрешение администратора.";
+"Memory cleaning timed out. Try again later." = "Время ожидания очистки истекло. Повторите позже.";
+"macOS could not release its file cache. No applications were closed." = "macOS не смогла освободить файловый кэш. Приложения не закрывались.";
+"Wait a minute before cleaning memory again." = "Подождите минуту перед повторной очисткой памяти.";

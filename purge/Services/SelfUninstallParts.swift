@@ -41,6 +41,25 @@ struct AdminHelperPart: SelfUninstallPartControl {
 }
 
 @MainActor
+struct MemoryCleanerPart: SelfUninstallPartControl {
+    let part = SelfUninstallPart.memoryCleaner
+    func isOn(thorough: Bool) async -> Bool {
+        await SystemMemoryCleaner().isEnabled()
+    }
+    func turnOff() async {
+        let cleanup = AppEnvironment.memory.cleanup
+        AppEnvironment.memory.settings.automaticCleaning = false
+        let deadline = ContinuousClock.now + .seconds(65)
+        while (cleanup.isBusy || cleanup.isAuthorizing) && ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        guard !cleanup.isBusy, !cleanup.isAuthorizing else { return }
+        try? await SystemMemoryCleaner().disable()
+        await cleanup.refreshPermission()
+    }
+}
+
+@MainActor
 struct FinderServicePart: SelfUninstallPartControl {
     let part = SelfUninstallPart.finderService
 
@@ -250,6 +269,7 @@ extension SelfUninstaller {
             parts: [
                 DeletedAppsWatcherPart(),
                 AdminHelperPart(),
+                MemoryCleanerPart(),
                 FinderServicePart(),
                 CleanupReminderPart(),
                 LoginItemPart()

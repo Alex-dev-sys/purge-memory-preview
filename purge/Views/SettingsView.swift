@@ -162,11 +162,11 @@ struct SettingsView: View {
                     )
                     if selectedLanguage != AppLanguage.launchSelection {
                         Button("Restart Purge") {
-                            guard !store.isAnyCleanInProgress, !AppEnvironment.memory.actions.isBusy else { return }
+                            guard !store.isAnyCleanInProgress, !AppEnvironment.memory.isBusy else { return }
                             do { try AppLanguage.relaunch() }
                             catch { languageRestartError = error.localizedDescription }
                         }
-                        .disabled(store.isAnyCleanInProgress || AppEnvironment.memory.actions.isBusy)
+                        .disabled(store.isAnyCleanInProgress || AppEnvironment.memory.isBusy)
                     }
                 }
             }

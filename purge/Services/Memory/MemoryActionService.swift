@@ -25,6 +25,7 @@ private final class MemoryRunningApplication: MemoryApplicationHandling {
         switch action {
         case .quit: app.terminate()
         case .forceQuit: app.forceTerminate()
+        case .clean: false
         }
     }
 }
@@ -108,6 +109,7 @@ final class MemoryActionService: ObservableObject {
     private var generation = 0
     private var observationGeneration = 0
     private var exiting = false
+    var cleaningIsBusy: () -> Bool = { false }
 
     init(settings: MemorySettingsStore, history: MemoryHistoryStore, processes: any ProcessMemoryProviding,
          stats: any MemoryStatsProviding, policy: MemorySafetyPolicy,
@@ -120,12 +122,12 @@ final class MemoryActionService: ObservableObject {
     }
 
     func canAct(_ group: MemoryProcessGroup, now: Date = Date()) -> Bool {
-        !exiting && !isBusy && now.timeIntervalSince(group.sampledAt) >= 0 && now.timeIntervalSince(group.sampledAt) <= 10
+        !exiting && !isBusy && !cleaningIsBusy() && now.timeIntervalSince(group.sampledAt) >= 0 && now.timeIntervalSince(group.sampledAt) <= 10
             && group.footprint != nil && policy.classify(group.root, exclusions: settings.exclusions) != .protected
     }
 
     func confirmation(_ groups: [MemoryProcessGroup], action: MemoryAction) -> MemoryConfirmation? {
-        guard !isBusy, !exiting else { return nil }
+        guard !isBusy, !exiting, !cleaningIsBusy(), action != .clean else { return nil }
         var seen: Set<MemoryGroupIdentity> = []
         let targets = groups.filter { canAct($0) && seen.insert($0.id).inserted }
         guard !targets.isEmpty else { return nil }
@@ -167,7 +169,7 @@ final class MemoryActionService: ObservableObject {
 
     /// Returns a new confirmation if the target set changed. No request is sent on a partial preflight.
     func execute(token: UUID) async -> MemoryConfirmation? {
-        guard !isBusy, !exiting, let (confirmation, approvedGeneration) = pending,
+        guard !isBusy, !exiting, !cleaningIsBusy(), let (confirmation, approvedGeneration) = pending,
               confirmation.id == token, approvedGeneration == generation else {
             message = memoryText("The confirmation expired. Review the applications again.")
             return nil

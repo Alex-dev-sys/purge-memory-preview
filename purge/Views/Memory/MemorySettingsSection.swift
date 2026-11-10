@@ -8,6 +8,8 @@ struct MemorySettingsSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppStyle.Spacing.medium) {
             Text(memoryText("Memory")).font(AppStyle.Typography.sectionTitle)
+            MemoryCleaningControls(cleanup: coordinator.cleanup, settings: settings,
+                                   actions: coordinator.actions, showsBackground: false)
             Picker(memoryText("Aggregate refresh"), selection: $settings.interval) {
                 Text(memoryText("1 second")).tag(Double(1))
                 Text(memoryText("2 seconds")).tag(Double(2))

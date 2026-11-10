@@ -101,3 +101,37 @@
 "Warning" = "Warning";
 "Wired" = "Wired";
 "macOS manages memory automatically. Free RAM is not a health score." = "macOS manages memory automatically. Free RAM is not a health score.";
+
+/* Manual and automatic RAM cleaning. */
+"Clean Memory" = "Clean Memory";
+"Memory cleaning" = "Memory cleaning";
+"Memory cleaning finished" = "Memory cleaning finished";
+"Memory cleaning failed" = "Memory cleaning failed";
+"Timer" = "Timer";
+"RAM usage" = "RAM usage";
+"Manual" = "Manual";
+"Waiting for approval…" = "Waiting for approval…";
+"Cleaning memory…" = "Cleaning memory…";
+"Releases reclaimable system file cache. Applications stay open; their working memory is not cleared." = "Releases reclaimable system file cache. Applications stay open; their working memory is not cleared.";
+"First use asks for administrator approval to enable a dedicated cache-cleaning service. Your password is not stored." = "First use asks for administrator approval to enable a dedicated cache-cleaning service. Your password is not stored.";
+"Automatic memory cleaning" = "Automatic memory cleaning";
+"Clean memory when" = "Clean memory when";
+"Cleaning interval" = "Cleaning interval";
+"Every %@ minutes" = "Every %@ minutes";
+"Next memory cleaning" = "Next memory cleaning";
+"Used RAM threshold" = "Used RAM threshold";
+"The threshold must hold for 30 seconds. After a cleanup, usage must fall 5 percentage points before another threshold cleanup." = "The threshold must hold for 30 seconds. After a cleanup, usage must fall 5 percentage points before another threshold cleanup.";
+"Runs while Purge is open, including menu bar mode. Pauses during sleep. Automatic cleanups are at least 5 minutes apart." = "Runs while Purge is open, including menu bar mode. Pauses during sleep. Automatic cleanups are at least 5 minutes apart.";
+"macOS controls RAM allocation. A target usage level is not guaranteed; the measured free-RAM change can be zero." = "macOS controls RAM allocation. A target usage level is not guaranteed; the measured free-RAM change can be zero.";
+"Remove memory cleaning permission" = "Remove memory cleaning permission";
+"Memory cleaning permission was removed." = "Memory cleaning permission was removed.";
+"Observed free RAM increase: %@." = "Observed free RAM increase: %@.";
+"Cleaning finished. No measurable increase in free RAM was observed." = "Cleaning finished. No measurable increase in free RAM was observed.";
+"Cleaning finished. The change in free RAM could not be measured." = "Cleaning finished. The change in free RAM could not be measured.";
+"Free RAM: %@ → %@" = "Free RAM: %@ → %@";
+"System file cache" = "System file cache";
+"Administrator approval was cancelled or unavailable." = "Administrator approval was cancelled or unavailable.";
+"Enable memory cleaning first. Administrator approval is required once." = "Enable memory cleaning first. Administrator approval is required once.";
+"Memory cleaning timed out. Try again later." = "Memory cleaning timed out. Try again later.";
+"macOS could not release its file cache. No applications were closed." = "macOS could not release its file cache. No applications were closed.";
+"Wait a minute before cleaning memory again." = "Wait a minute before cleaning memory again.";

@@ -15,6 +15,8 @@ final class MemoryCoordinator: ObservableObject {
     let history: MemoryHistoryStore
     let actions: MemoryActionService
     let notifications: MemoryNotificationController
+    let cleanup: MemoryCleanupService
+    var isBusy: Bool { actions.isBusy || cleanup.isBusy || cleanup.isAuthorizing }
     let processStore = MemoryProcessStore()
     @Published private(set) var snapshot: MemorySnapshot?
     @Published private(set) var statsUnavailable = false
@@ -46,9 +48,19 @@ final class MemoryCoordinator: ObservableObject {
                                         ownBundlePath: Bundle.main.bundleURL.resolvingSymlinksInPath().path)
         actions = MemoryActionService(settings: settings, history: history, processes: processes, stats: stats, policy: policy)
         notifications = MemoryNotificationController(settings: settings)
+        cleanup = MemoryCleanupService(settings: settings, history: history, stats: stats)
+        cleanup.isBlocked = { [weak actions] in actions?.isBusy == true || AppEnvironment.store.isAnyCleanInProgress }
+        cleanup.currentSnapshot = { [weak self] in self?.statsUnavailable == false ? self?.snapshot : nil }
+        cleanup.didSample = { [weak self] value in
+            guard let self else { return }
+            self.snapshot = value; self.statsUnavailable = false
+            self.chart.append(value, generation: self.chartGeneration, interval: self.samplingInterval ?? 10)
+        }
+        actions.cleaningIsBusy = { [weak cleanup] in cleanup?.isBusy == true || cleanup?.isAuthorizing == true }
         settings.onChange = { [weak self] in
             guard let self else { return }
             self.notifications.update(self.pressure)
+            self.cleanup.configure()
             self.reconcile()
         }
         notifications.permissionChanged = { [weak self] in self?.reconcile() }
@@ -58,6 +70,7 @@ final class MemoryCoordinator: ObservableObject {
     func start() {
         guard !started, !TestHost.isActive() else { return }
         started = true
+        cleanup.start()
         for name in [NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification,
                      NSApplication.didHideNotification, NSApplication.didUnhideNotification,
                      NSWindow.didChangeOcclusionStateNotification, NSWindow.didMiniaturizeNotification,
@@ -79,11 +92,11 @@ final class MemoryCoordinator: ObservableObject {
         }.store(in: &subscriptions)
         NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.willSleepNotification).sink { [weak self] _ in
             Task { @MainActor in
-                self?.sleeping = true; self?.actions.observationInterrupted(); self?.stopPressure(); self?.reconcile()
+                self?.sleeping = true; self?.cleanup.setSleeping(true); self?.actions.observationInterrupted(); self?.stopPressure(); self?.reconcile()
             }
         }.store(in: &subscriptions)
         NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification).sink { [weak self] _ in
-            Task { @MainActor in self?.sleeping = false; self?.reconcile() }
+            Task { @MainActor in self?.sleeping = false; self?.cleanup.setSleeping(false); self?.reconcile() }
         }.store(in: &subscriptions)
         Task { [weak self] in
             await self?.history.load()
@@ -120,7 +133,7 @@ final class MemoryCoordinator: ObservableObject {
                 }
             }
         }
-        let interval: Double? = sleeping ? nil : (active ? settings.interval : (settings.showsMenuBar ? 10 : nil))
+        let interval: Double? = sleeping ? nil : (active ? settings.interval : (settings.showsMenuBar || settings.automaticCleaning ? 10 : nil))
         if samplingInterval != interval {
             chartGeneration &+= 1
             aggregateTask?.cancel(); samplingInterval = interval
@@ -193,13 +206,15 @@ final class MemoryCoordinator: ObservableObject {
     }
     func prepareForExit() async {
         actions.beginExit()
+        cleanup.shutdown()
         let clock = MemoryContinuousClock()
         let deadline = clock.now + 8
-        while actions.isBusy && clock.now < deadline { try? await clock.sleep(seconds: 0.1) }
+        while isBusy && clock.now < deadline { try? await clock.sleep(seconds: 0.1) }
         shutdown()
     }
     func shutdown() {
         aggregateTask?.cancel(); processTask?.cancel(); scan?.1.cancel(); stopPressure()
+        cleanup.shutdown()
         subscriptions.removeAll(); started = false
     }
 }

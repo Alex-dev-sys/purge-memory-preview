@@ -101,3 +101,37 @@
 "Warning" = "警告";
 "Wired" = "联动内存";
 "macOS manages memory automatically. Free RAM is not a health score." = "macOS 自动管理内存，可用内存并非健康指标。";
+
+/* Manual and automatic RAM cleaning. */
+"Clean Memory" = "清理内存";
+"Memory cleaning" = "内存清理";
+"Memory cleaning finished" = "内存清理完成";
+"Memory cleaning failed" = "内存清理失败";
+"Timer" = "定时";
+"RAM usage" = "内存占用";
+"Manual" = "手动";
+"Waiting for approval…" = "等待授权…";
+"Cleaning memory…" = "正在清理内存…";
+"Releases reclaimable system file cache. Applications stay open; their working memory is not cleared." = "释放可回收的系统文件缓存。应用保持运行，不清除应用的工作内存。";
+"First use asks for administrator approval to enable a dedicated cache-cleaning service. Your password is not stored." = "首次使用时，macOS 会请求管理员授权以启用专用缓存清理服务。不会保存密码。";
+"Automatic memory cleaning" = "自动清理内存";
+"Clean memory when" = "清理条件";
+"Cleaning interval" = "清理间隔";
+"Every %@ minutes" = "每 %@ 分钟";
+"Next memory cleaning" = "下次内存清理";
+"Used RAM threshold" = "内存占用阈值";
+"The threshold must hold for 30 seconds. After a cleanup, usage must fall 5 percentage points before another threshold cleanup." = "占用必须持续超过阈值 30 秒。清理后，占用需先下降 5 个百分点才能再次触发阈值清理。";
+"Runs while Purge is open, including menu bar mode. Pauses during sleep. Automatic cleanups are at least 5 minutes apart." = "仅在 Purge 运行时工作，包括菜单栏模式；睡眠期间暂停。自动清理至少间隔 5 分钟。";
+"macOS controls RAM allocation. A target usage level is not guaranteed; the measured free-RAM change can be zero." = "RAM 分配由 macOS 管理，不保证达到指定占用水平；实测空闲内存变化可能为零。";
+"Remove memory cleaning permission" = "撤销内存清理权限";
+"Memory cleaning permission was removed." = "已撤销并移除内存清理服务。";
+"Observed free RAM increase: %@." = "实测空闲 RAM 增加：%@。";
+"Cleaning finished. No measurable increase in free RAM was observed." = "清理完成，未观察到可测量的空闲 RAM 增加。";
+"Cleaning finished. The change in free RAM could not be measured." = "清理完成，但无法测量空闲 RAM 的变化。";
+"Free RAM: %@ → %@" = "空闲 RAM：%@ → %@";
+"System file cache" = "系统文件缓存";
+"Administrator approval was cancelled or unavailable." = "管理员授权已取消或不可用。";
+"Enable memory cleaning first. Administrator approval is required once." = "请先启用内存清理，需要管理员授权一次。";
+"Memory cleaning timed out. Try again later." = "内存清理超时，请稍后重试。";
+"macOS could not release its file cache. No applications were closed." = "macOS 未能释放文件缓存，未关闭任何应用。";
+"Wait a minute before cleaning memory again." = "请等待一分钟后再清理内存。";

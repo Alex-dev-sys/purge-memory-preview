@@ -27,7 +27,28 @@ struct MemoryHistoryView: View {
                             Text(entry.date.formatted(date: .abbreviated, time: .shortened))
                                 .font(AppStyle.Typography.metadata).foregroundStyle(AppColors.textSecondary)
                             Text(entry.outcome.title).font(AppStyle.Typography.body)
-                            switch entry.measurement {
+                            if entry.action == .clean {
+                                if let trigger = entry.cleanupTrigger {
+                                    Text(trigger.title).font(AppStyle.Typography.metadata)
+                                }
+                                if let before = entry.beforeFree, let after = entry.afterFree {
+                                    Text(memoryText("Free RAM: \(MemoryFormat.bytes(before)) → \(MemoryFormat.bytes(after))"))
+                                        .font(AppStyle.Typography.callout)
+                                }
+                                if let delta = entry.delta, delta > 0 {
+                                    Text(memoryText("Observed free RAM increase: \(MemoryFormat.bytes(delta))."))
+                                        .font(AppStyle.Typography.callout)
+                                } else if entry.outcome == .cleaned, entry.delta != nil {
+                                    Text(memoryText("Cleaning finished. No measurable increase in free RAM was observed."))
+                                        .font(AppStyle.Typography.callout)
+                                } else if entry.outcome == .cleaned {
+                                    Text(memoryText("Cleaning finished. The change in free RAM could not be measured."))
+                                        .font(AppStyle.Typography.callout)
+                                }
+                                if let error = entry.cleanupError {
+                                    Text(error).font(AppStyle.Typography.callout)
+                                }
+                            } else { switch entry.measurement {
                             case .observed:
                                 if let delta = entry.delta {
                                     Text(memoryText("Observed system-wide Used change (before − after): \(MemoryFormat.bytes(delta))"))
@@ -39,6 +60,7 @@ struct MemoryHistoryView: View {
                             case .unmeasured:
                                 Text(memoryText("System-wide change was not measured."))
                                     .font(AppStyle.Typography.callout)
+                            }
                             }
                         }
                         .padding(AppStyle.Spacing.medium)
