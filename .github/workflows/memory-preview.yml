@@ -5,65 +5,54 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: memory-preview-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   build-and-test:
-    runs-on: macos-26
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-      - name: Show Xcode version
-        run: xcodebuild -version
-      - name: Lint design tokens
-        run: node scripts/lint-design-tokens.mjs
-      - name: Check translations
-        run: python3 scripts/check-localization.py
-      - name: Build and run tests
-        timeout-minutes: 20
-        run: |
-          mkdir -p TestResults
-          xcodebuild test \
-            -parallel-testing-enabled NO \
-            -project purge.xcodeproj \
-            -scheme purge \
-            -destination 'platform=macOS' \
-            -skip-testing:PurgeTests/ProcessRunnerTests \
-            -skip-testing:PurgeTests/FolderSizingConcurrencyTests \
-            -resultBundlePath TestResults/UnitTests.xcresult \
-            CODE_SIGN_IDENTITY="-" \
-            CODE_SIGNING_REQUIRED=YES \
-            CODE_SIGNING_ALLOWED=YES
-      - name: Upload test results on failure
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: memory-preview-test-results
-          path: TestResults/
-          if-no-files-found: ignore
+    uses: ./.github/workflows/build.yml
+    with:
+      check-release-build: false
 
   package-preview:
     if: github.ref == 'refs/heads/main'
-    needs: build-and-test
     runs-on: macos-26
-    permissions:
-      contents: write
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+      build: ${{ steps.package.outputs.build }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Configure isolated preview identity
         run: python3 scripts/configure-memory-preview.py
+      - name: Identify Xcode cache
+        id: xcode
+        run: |
+          xcodebuild -version
+          echo "version=$(xcodebuild -version | shasum -a 256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Restore Xcode build cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: build/ci
+          key: xcode-preview-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.version }}-${{ github.sha }}
+          restore-keys: |
+            xcode-preview-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.version }}-
+      - name: Restore unchanged source timestamps
+        run: python3 scripts/ci-source-mtimes.py build/ci/source-mtimes.json
       - name: Build preview app
         run: |
-          xcodebuild clean build \
+          xcodebuild build \
             -project purge.xcodeproj \
             -scheme purge \
             -configuration Release \
             -destination 'platform=macOS' \
-            -derivedDataPath build \
+            -derivedDataPath build/ci \
+            COMPILER_INDEX_STORE_ENABLE=NO \
             ARCHS="arm64 x86_64" \
             ONLY_ACTIVE_ARCH=NO \
             CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}" \
@@ -74,7 +63,7 @@ jobs:
         id: package
         run: |
           set -euo pipefail
-          APP="$(pwd)/build/Build/Products/Release/Purge.app"
+          APP="$(pwd)/build/ci/Build/Products/Release/Purge.app"
           test -d "$APP"
           codesign --verify --deep --strict "$APP"
           ARCHS="$(lipo -archs "$APP/Contents/MacOS/Purge")"
@@ -98,15 +87,29 @@ jobs:
           path: |
             ${{ steps.package.outputs.dmg }}
             ${{ runner.temp }}/SHA256SUMS.txt
+
+  publish-preview:
+    needs: [build-and-test, package-preview]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified preview artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: memory-preview
+          path: release
       - name: Publish GitHub prerelease
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="memory-preview-${{ steps.package.outputs.build }}"
-          gh release create "$TAG" "${{ steps.package.outputs.dmg }}" \
-            "$RUNNER_TEMP/SHA256SUMS.txt" \
+          set -euo pipefail
+          cd release
+          sha256sum --check SHA256SUMS.txt
+          TAG="memory-preview-${{ needs.package-preview.outputs.build }}"
+          gh release create "$TAG" ./*.dmg SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "Memory preview ${{ steps.package.outputs.version }} (build ${{ steps.package.outputs.build }})" \
+            --title "Memory preview ${{ needs.package-preview.outputs.version }} (build ${{ needs.package-preview.outputs.build }})" \
             --prerelease \
             --notes "Unsigned test build of the Memory preview. This DMG is not notarized; macOS may ask you to approve opening the app. The preview uses a separate bundle identifier and does not use the production Sparkle feed."

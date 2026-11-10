@@ -351,6 +351,13 @@ Apple Silicon / Intel DMG and `SHA256SUMS.txt`. The DMG is also saved as an Acti
 artifact. No Apple signing secrets are required: the preview is ad-hoc signed and
 is not notarized.
 
+Tests and universal packaging run in parallel; publication waits for both to pass.
+The checks workflow is reused rather than running the same tests twice on each
+push. Xcode build products, compiler modules and Swift packages are cached per
+Xcode version. Unchanged source timestamps are restored by content hash so a fresh
+checkout can reuse compiled files. Stress tests reuse the existing test build.
+New pushes cancel an older in-progress preview for the same branch.
+
 The packaging job runs `scripts/configure-memory-preview.py` before compiling to
 isolate bundle identifiers, helper names, application data and the URL scheme from
 the upstream app. Sparkle updates are disabled for previews.

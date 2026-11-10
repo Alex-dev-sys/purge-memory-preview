@@ -1,10 +1,18 @@
 name: Build
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+  workflow_call:
+    inputs:
+      check-release-build:
+        type: boolean
+        default: true
+  workflow_dispatch:
+    inputs:
+      check-release-build:
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -18,7 +26,21 @@ jobs:
           persist-credentials: false
 
       - name: Show Xcode version
-        run: xcodebuild -version
+        id: xcode
+        run: |
+          xcodebuild -version
+          echo "version=$(xcodebuild -version | shasum -a 256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Xcode build cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: build/ci
+          key: xcode-tests-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.version }}-${{ github.sha }}
+          restore-keys: |
+            xcode-tests-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.version }}-
+
+      - name: Restore unchanged source timestamps
+        run: python3 scripts/ci-source-mtimes.py build/ci/source-mtimes.json
 
       - name: Lint design tokens
         run: node scripts/lint-design-tokens.mjs
@@ -27,12 +49,15 @@ jobs:
         run: python3 scripts/check-localization.py
 
       - name: Build (ad-hoc signed)
+        if: github.event_name == 'pull_request' || inputs.check-release-build
         run: |
-          xcodebuild clean build \
+          xcodebuild build \
             -project purge.xcodeproj \
             -scheme purge \
             -configuration Release \
             -destination 'platform=macOS' \
+            -derivedDataPath build/ci \
+            COMPILER_INDEX_STORE_ENABLE=NO \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=YES \
             CODE_SIGNING_ALLOWED=YES
@@ -48,6 +73,8 @@ jobs:
             -project purge.xcodeproj \
             -scheme purge \
             -destination 'platform=macOS' \
+            -derivedDataPath build/ci \
+            COMPILER_INDEX_STORE_ENABLE=NO \
             -skip-testing:PurgeTests/ProcessRunnerTests \
             -skip-testing:PurgeTests/FolderSizingConcurrencyTests \
             -resultBundlePath TestResults/UnitTests.xcresult \
@@ -58,11 +85,12 @@ jobs:
       - name: Run process stress tests
         timeout-minutes: 10
         run: |
-          xcodebuild test \
+          xcodebuild test-without-building \
             -parallel-testing-enabled NO \
             -project purge.xcodeproj \
             -scheme purge \
             -destination 'platform=macOS' \
+            -derivedDataPath build/ci \
             -only-testing:PurgeTests/ProcessRunnerTests \
             -resultBundlePath TestResults/ProcessStressTests.xcresult \
             CODE_SIGN_IDENTITY="-" \
@@ -72,11 +100,12 @@ jobs:
       - name: Run folder sizing stress tests
         timeout-minutes: 10
         run: |
-          xcodebuild test \
+          xcodebuild test-without-building \
             -parallel-testing-enabled NO \
             -project purge.xcodeproj \
             -scheme purge \
             -destination 'platform=macOS' \
+            -derivedDataPath build/ci \
             -only-testing:PurgeTests/FolderSizingConcurrencyTests \
             -resultBundlePath TestResults/FolderSizingStressTests.xcresult \
             CODE_SIGN_IDENTITY="-" \
