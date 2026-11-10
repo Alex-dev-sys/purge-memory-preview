@@ -170,6 +170,7 @@ struct PurgeApp: App {
         // Must precede anything that touches user defaults — the gate reads the persisted domain to
         // tell a clean install apart from an update.
         let firstRun = FirstRunGate.resolve()
+        _ = AppLanguage.launchSelection
         // Before the Dock policy below reads the preference it may repair.
         StartupPreferenceStore.resolvePersistedModes(isFreshInstall: firstRun == .freshInstall)
         LargeFileFilterDefaults.register()

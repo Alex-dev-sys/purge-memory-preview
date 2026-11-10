@@ -15,6 +15,8 @@ struct SettingsView: View {
     private var devToolsStalenessThresholdRaw = DevToolsStalenessOption.defaultOption.rawValue
     @AppStorage(AppearanceMode.userDefaultsKey)
     private var appearanceModeRaw = AppearanceMode.system.rawValue
+    @AppStorage(AppLanguage.userDefaultsKey)
+    private var languageRaw = AppLanguage.system.rawValue
     @AppStorage(DeveloperMode.userDefaultsKey)
     private var developerModeEnabled = false
     var showsPageHeader = true
@@ -33,6 +35,7 @@ struct SettingsView: View {
     /// Adding and removing share the alert; each says which one failed.
     @State private var appFolderAlertTitle = AppFolderAdding.refusalTitle
     @State private var showCleaningHistorySheet = false
+    @State private var languageRestartError: String?
     /// Uninstall… turns red under the pointer.
     @State private var isHoveringUninstall = false
     @State private var showCustomIntervalSheet = false
@@ -110,6 +113,14 @@ struct SettingsView: View {
         } message: {
             Text(scheduledCleanNowMessage ?? "")
         }
+        .alert("Could not restart Purge", isPresented: Binding(
+            get: { languageRestartError != nil },
+            set: { if !$0 { languageRestartError = nil } }
+        )) {
+            Button("OK") { languageRestartError = nil }
+        } message: {
+            Text(languageRestartError ?? "")
+        }
     }
 
     /// The four states the secure-removal helper can be in. Held as one value so the
@@ -133,6 +144,35 @@ struct SettingsView: View {
 
     private var generalGroup: some View {
         settingsGroup("General") {
+            settingsControlRow(
+                title: String(localized: "Language"),
+                caption: selectedLanguage != AppLanguage.launchSelection
+                    ? String(localized: "Restart Purge to apply the language change.")
+                    : nil
+            ) {
+                HStack(spacing: AppStyle.Spacing.small) {
+                    SettingsMenuPicker(
+                        selection: Binding(
+                            get: { selectedLanguage },
+                            set: { $0.save() }
+                        ),
+                        options: AppLanguage.allCases,
+                        optionLabel: \.displayName,
+                        accessibilityTitle: String(localized: "Language")
+                    )
+                    if selectedLanguage != AppLanguage.launchSelection {
+                        Button("Restart Purge") {
+                            guard !store.isAnyCleanInProgress, !AppEnvironment.memory.actions.isBusy else { return }
+                            do { try AppLanguage.relaunch() }
+                            catch { languageRestartError = error.localizedDescription }
+                        }
+                        .disabled(store.isAnyCleanInProgress || AppEnvironment.memory.actions.isBusy)
+                    }
+                }
+            }
+
+            settingsSectionDivider
+
             settingsToggleRow(
                 title: String(localized: "Keep Purge in the menu bar"),
                 caption: menuBarModeCaption,
@@ -203,6 +243,10 @@ struct SettingsView: View {
         startup.showsMenuBarIcon
             ? String(localized: "Keeps running after you close the window.")
             : String(localized: "Quits when you close the window.")
+    }
+
+    private var selectedLanguage: AppLanguage {
+        AppLanguage(rawValue: languageRaw) ?? .system
     }
 
     // MARK: - Cleaning

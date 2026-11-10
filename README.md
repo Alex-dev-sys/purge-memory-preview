@@ -52,7 +52,7 @@ You do not need to understand any of it to use it. But if you ever want to check
 
 ## Features
 
-- **Memory** (⌘6) shows pressure, estimated RAM categories and grouped process footprints. Quit and Force Quit are separate, confirmed actions for recognized user applications only. Memory history and exclusions are local. The optional menu indicator and sustained-pressure notifications start off. Memory strings support English, Simplified Chinese and Russian; other screens retain their existing languages. No cache purge or automatic app closure is performed. Counter estimates and pressure observation limits are explained in the Memory page; macOS validation/performance measurements are still pending for this implementation.
+- **Memory** (⌘6) shows pressure, estimated RAM categories and grouped process footprints. Quit and Force Quit are separate, confirmed actions for recognized user applications only. Memory history and exclusions are local. The optional menu indicator and sustained-pressure notifications start off. The interface supports English, Russian and Simplified Chinese. No cache purge or automatic app closure is performed. Counter estimates and pressure observation limits are explained in the Memory page; macOS validation/performance measurements are still pending for this implementation.
 
 ### Overview
 
@@ -344,6 +344,12 @@ The signing flags matter: without a development certificate on the machine, the 
 ---
 
 ### Memory preview releases
+
+Choose **Settings → General → Language** to use **English**, **Русский**, or the
+system language. Click **Restart Purge** to apply the selection throughout the app.
+Restart is unavailable while a cleanup or process action is running. Russian
+translations include interface text, safety explanations, Finder/Siri actions and
+plural forms for item counts.
 
 In this fork, pushing to `main` or manually running **Memory preview** on `main`
 builds and tests the app, then publishes a GitHub prerelease containing a universal

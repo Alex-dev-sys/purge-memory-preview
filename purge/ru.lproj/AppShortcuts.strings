@@ -1,0 +1,22 @@
+/* Russian localization. Preserve format arguments and product names. */
+"Scan for junk with ${applicationName}" = "Найти ненужные файлы с помощью ${applicationName}";
+"Find junk with ${applicationName}" = "Найти мусор с помощью ${applicationName}";
+"Free up space with ${applicationName}" = "Освободить место с помощью ${applicationName}";
+"Clean up my Mac with ${applicationName}" = "Очистить мой Mac с помощью ${applicationName}";
+"How much can ${applicationName} free" = "Сколько места может освободить ${applicationName}";
+"How much space can ${applicationName} free up" = "Сколько места может освободить ${applicationName}";
+"Check my storage with ${applicationName}" = "Проверить хранилище с помощью ${applicationName}";
+"Scan my Mac with ${applicationName}" = "Просканировать мой Mac с помощью ${applicationName}";
+"${applicationName} scan" = "${applicationName}, сканировать";
+"Clean junk with ${applicationName}" = "Очистить ненужные файлы с помощью ${applicationName}";
+"Clean safe junk with ${applicationName}" = "Очистить безопасные ненужные файлы с помощью ${applicationName}";
+"Clear junk with ${applicationName}" = "Убрать мусор с помощью ${applicationName}";
+"Clear caches with ${applicationName}" = "Очистить кэши с помощью ${applicationName}";
+"Delete junk with ${applicationName}" = "Удалить ненужные файлы с помощью ${applicationName}";
+"${applicationName} clean" = "${applicationName}, очистить";
+"Uninstall ${app} with ${applicationName}" = "Удалить ${app} с помощью ${applicationName}";
+"Remove ${app} with ${applicationName}" = "Удалить ${app} через ${applicationName}";
+"Uninstall an app with ${applicationName}" = "Удалить приложение с помощью ${applicationName}";
+"Remove an app with ${applicationName}" = "Убрать приложение с помощью ${applicationName}";
+"Delete an app with ${applicationName}" = "Удалить приложение через ${applicationName}";
+"Get rid of an app with ${applicationName}" = "Удалить ненужное приложение с помощью ${applicationName}";
