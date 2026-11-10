@@ -26,16 +26,16 @@ jobs:
       - name: Check translations
         run: python3 scripts/check-localization.py
 
-      - name: Build (unsigned)
+      - name: Build (ad-hoc signed)
         run: |
           xcodebuild clean build \
             -project purge.xcodeproj \
             -scheme purge \
             -configuration Release \
             -destination 'platform=macOS' \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES
 
       - name: Run unit tests
         timeout-minutes: 20
@@ -44,41 +44,44 @@ jobs:
           # separately so unrelated async tests can finish before their deadlines.
           mkdir -p TestResults
           xcodebuild test \
+            -parallel-testing-enabled NO \
             -project purge.xcodeproj \
             -scheme purge \
             -destination 'platform=macOS' \
             -skip-testing:PurgeTests/ProcessRunnerTests \
             -skip-testing:PurgeTests/FolderSizingConcurrencyTests \
             -resultBundlePath TestResults/UnitTests.xcresult \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES
 
       - name: Run process stress tests
         timeout-minutes: 10
         run: |
           xcodebuild test \
+            -parallel-testing-enabled NO \
             -project purge.xcodeproj \
             -scheme purge \
             -destination 'platform=macOS' \
             -only-testing:PurgeTests/ProcessRunnerTests \
             -resultBundlePath TestResults/ProcessStressTests.xcresult \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES
 
       - name: Run folder sizing stress tests
         timeout-minutes: 10
         run: |
           xcodebuild test \
+            -parallel-testing-enabled NO \
             -project purge.xcodeproj \
             -scheme purge \
             -destination 'platform=macOS' \
             -only-testing:PurgeTests/FolderSizingConcurrencyTests \
             -resultBundlePath TestResults/FolderSizingStressTests.xcresult \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES
 
       - name: Upload test results on failure
         if: failure()

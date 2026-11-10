@@ -56,11 +56,12 @@ struct AppleIntelligenceAliasLanguageTests {
         #expect(Language.defined(for: "Other.Alias", directory: root.path).isEmpty)
     }
 
-    /// On macOS 27, the one version the feature runs on, every language alias
-    /// in the catalog has English and at least one other language, so the
-    /// catalog's aliases are ones macOS resolves by language. The macOS 26
-    /// runner on CI ships different folders, so it is not checked there.
-    @Test(.enabled(if: AppleIntelligenceModelStore.isSupported
+    /// Opt-in integration check for a Mac with the Apple Intelligence assets
+    /// installed. The OS version and the parent folder's existence alone do not
+    /// guarantee those assets are present (including on macOS 27).
+    /// Alias resolution and folder parsing are tested with fixtures above.
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["PURGE_SYSTEM_INTEGRATION_TESTS"] == "1"
+        && AppleIntelligenceModelStore.isSupported
         && FileManager.default.fileExists(atPath: AppleIntelligenceAliasLanguage.usageAliasesDirectory)))
     func thisMacDefinesEveryLanguageAliasInTheCatalog() {
         for set in AppleIntelligenceCatalog.sets {

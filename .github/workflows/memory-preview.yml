@@ -22,19 +22,30 @@ jobs:
       - name: Check translations
         run: python3 scripts/check-localization.py
       - name: Build and run tests
+        timeout-minutes: 20
         run: |
+          mkdir -p TestResults
           xcodebuild test \
+            -parallel-testing-enabled NO \
             -project purge.xcodeproj \
             -scheme purge \
             -destination 'platform=macOS' \
             -skip-testing:PurgeTests/ProcessRunnerTests \
             -skip-testing:PurgeTests/FolderSizingConcurrencyTests \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            -resultBundlePath TestResults/UnitTests.xcresult \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES
+      - name: Upload test results on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: memory-preview-test-results
+          path: TestResults/
+          if-no-files-found: ignore
 
   package-preview:
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main'
     needs: build-and-test
     runs-on: macos-26
     permissions:
@@ -44,7 +55,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Configure isolated preview identity
-        run: ruby scripts/configure-memory-preview.rb
+        run: python3 scripts/configure-memory-preview.py
       - name: Build preview app
         run: |
           xcodebuild clean build \
@@ -52,6 +63,10 @@ jobs:
             -scheme purge \
             -configuration Release \
             -destination 'platform=macOS' \
+            -derivedDataPath build \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}" \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=YES \
             CODE_SIGNING_ALLOWED=YES
@@ -60,23 +75,29 @@ jobs:
         run: |
           set -euo pipefail
           APP="$(pwd)/build/Build/Products/Release/Purge.app"
-          if [ ! -d "$APP" ]; then
-            APP="$(xcodebuild -project purge.xcodeproj -scheme purge -configuration Release -showBuildSettings | awk -F ' = ' '/ TARGET_BUILD_DIR = / { d=$2 } / FULL_PRODUCT_NAME = / { p=$2 } END { print d "/" p }')"
-          fi
           test -d "$APP"
+          codesign --verify --deep --strict "$APP"
+          ARCHS="$(lipo -archs "$APP/Contents/MacOS/Purge")"
+          [[ " $ARCHS " == *" arm64 "* && " $ARCHS " == *" x86_64 "* ]]
           VERSION="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist")"
           BUILD="${GITHUB_RUN_NUMBER}"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$APP/Contents/Info.plist"
           STAGE="$RUNNER_TEMP/stage"
           mkdir -p "$STAGE"
           ditto "$APP" "$STAGE/Purge Memory Preview.app"
           ln -s /Applications "$STAGE/Applications"
           DMG="$RUNNER_TEMP/Purge-Memory-Preview-${VERSION}-${BUILD}.dmg"
           hdiutil create -volname 'Purge Memory Preview' -srcfolder "$STAGE" -ov -format UDZO "$DMG"
-          shasum -a 256 "$DMG" | tee "$RUNNER_TEMP/SHA256SUMS.txt"
+          (cd "$RUNNER_TEMP" && shasum -a 256 "$(basename "$DMG")") | tee "$RUNNER_TEMP/SHA256SUMS.txt"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "build=$BUILD" >> "$GITHUB_OUTPUT"
           echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+      - name: Upload preview artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: memory-preview
+          path: |
+            ${{ steps.package.outputs.dmg }}
+            ${{ runner.temp }}/SHA256SUMS.txt
       - name: Publish GitHub prerelease
         env:
           GH_TOKEN: ${{ github.token }}

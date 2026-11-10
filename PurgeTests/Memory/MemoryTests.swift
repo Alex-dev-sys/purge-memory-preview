@@ -28,11 +28,11 @@ struct MemoryTests {
         let value = try #require(MemoryAccounting.snapshot(total: 1000 * 4096, pageSize: 4096,
             free: 100, speculative: 10, internalPages: 500, externalPages: 100, purgeable: 20,
             wired: 200, compressed: 50, swap: 8192))
-        #expect(value.app == 480 * 4096)
-        #expect(value.free == 90 * 4096)
-        #expect(value.cached == 130 * 4096)
-        #expect(value.used == 730 * 4096)
-        #expect(value.breakdownRemainder == 50 * 4096)
+        #expect(value.app == Int64(480 * 4096))
+        #expect(value.free == Int64(90 * 4096))
+        #expect(value.cached == Int64(130 * 4096))
+        #expect(value.used == Int64(730 * 4096))
+        #expect(value.breakdownRemainder == Int64(50 * 4096))
         #expect(value.swap == 8192)
     }
 

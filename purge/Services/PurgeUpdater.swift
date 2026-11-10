@@ -48,7 +48,8 @@ final class PurgeUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
         // developer's Mac in the middle of a test run. Unstarted, Sparkle leaves
         // `canCheckForUpdates` false, so the menu items stay disabled there.
         controller = SPUStandardUpdaterController(
-            startingUpdater: Self.startsUpdater(environment: ProcessInfo.processInfo.environment),
+            startingUpdater: Self.startsUpdater(environment: ProcessInfo.processInfo.environment)
+                && Bundle.main.object(forInfoDictionaryKey: "PurgeDisableUpdates") as? Bool != true,
             updaterDelegate: self,
             userDriverDelegate: nil
         )

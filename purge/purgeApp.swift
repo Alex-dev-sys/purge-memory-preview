@@ -153,6 +153,19 @@ struct PurgeApp: App {
         )
     }
 
+    private var memoryMenuBarIconBinding: Binding<Bool> {
+        Binding(
+            get: { memorySettings.showsMenuBar },
+            set: { isInserted in
+                // MenuBarExtra writes its insertion state while updating the scene.
+                // Publishing the same value again continuously invalidates that scene
+                // and prevents the test host from finishing its launch.
+                guard memorySettings.showsMenuBar != isInserted else { return }
+                memorySettings.showsMenuBar = isInserted
+            }
+        )
+    }
+
     init() {
         // Must precede anything that touches user defaults — the gate reads the persisted domain to
         // tell a clean install apart from an update.
@@ -212,7 +225,7 @@ struct PurgeApp: App {
             MenuBarStatusIcon()
         }
         .menuBarExtraStyle(.window)
-        MenuBarExtra(isInserted: $memorySettings.showsMenuBar) {
+        MenuBarExtra(isInserted: memoryMenuBarIconBinding) {
             MemoryMenuContent(model: AppEnvironment.memory)
         } label: {
             MemoryMenuLabel(model: AppEnvironment.memory)

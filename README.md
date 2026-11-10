@@ -343,6 +343,22 @@ The signing flags matter: without a development certificate on the machine, the 
 
 ---
 
+### Memory preview releases
+
+In this fork, pushing to `main` or manually running **Memory preview** on `main`
+builds and tests the app, then publishes a GitHub prerelease containing a universal
+Apple Silicon / Intel DMG and `SHA256SUMS.txt`. The DMG is also saved as an Actions
+artifact. No Apple signing secrets are required: the preview is ad-hoc signed and
+is not notarized.
+
+The packaging job runs `scripts/configure-memory-preview.py` before compiling to
+isolate bundle identifiers, helper names, application data and the URL scheme from
+the upstream app. Sparkle updates are disabled for previews.
+
+The optional system integration test for installed Apple Intelligence language
+aliases requires `PURGE_SYSTEM_INTEGRATION_TESTS=1` on a Mac with those assets.
+The regular test suite checks alias resolution using temporary fixtures.
+
 ## Requirements
 
 - macOS 13.0 or later
