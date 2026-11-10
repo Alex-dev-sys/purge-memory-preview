@@ -44,8 +44,9 @@ enum AppDetailPageLayout {
     static let clearanceBelowHeader: CGFloat = topContentInset - AppStyle.Spacing.small
     /// Clear band under the Select All row so the first card sits a small gap below it.
     static let scanTabSelectAllBottomPadding: CGFloat = AppStyle.Spacing.small
-    /// Approximate height of `AppSectionPageHeader` (top inset + title + bottom padding).
-    static let pageTitleChromeHeight: CGFloat = topContentInset + 24 + AppStyle.Spacing.small
+    /// Matches regular header action buttons, including the invisible scroll spacer.
+    static let pageTitleRowHeight: CGFloat = 30 // design-lint: allow, regular toolbar button height
+    static let pageTitleChromeHeight: CGFloat = topContentInset + pageTitleRowHeight + AppStyle.Spacing.small
     /// Extra line when a subtitle is shown (spacing + subheadline).
     static let pageSubtitleChromeHeight: CGFloat = 4 + 16
 
@@ -158,30 +159,36 @@ struct AppSectionPageHeader<Trailing: View>: View {
             .monospacedDigit()
             .contentTransition(reduceMotion ? .identity : .numericText())
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.45), value: text)
-            .fixedSize(horizontal: false, vertical: true)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .help(text)
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: AppStyle.Spacing.medium) {
-            VStack(alignment: .leading, spacing: AppStyle.Spacing.xxSmall) {
+        VStack(alignment: .leading, spacing: AppStyle.Spacing.xxSmall) {
+            HStack(alignment: .top, spacing: AppStyle.Spacing.medium) {
                 AnimatedPageTitle(title)
 
-                if let subtitle, !subtitle.isEmpty {
-                    HStack(alignment: .firstTextBaseline, spacing: AppStyle.Spacing.xxSmall) {
-                        subtitleText(subtitle)
-                        if let subtitleAccessory {
-                            subtitleAccessory
-                        }
-                        if let subtitleTail, !subtitleTail.isEmpty {
-                            subtitleText(subtitleTail)
-                        }
+                Spacer(minLength: AppStyle.Spacing.medium)
+
+                trailing()
+            }
+            .frame(minHeight: AppDetailPageLayout.pageTitleRowHeight, alignment: .top)
+
+            // The subtitle owns a full-width line, independent of translated
+            // action labels. The page below reserves exactly one subtitle line.
+            if let subtitle, !subtitle.isEmpty {
+                HStack(alignment: .firstTextBaseline, spacing: AppStyle.Spacing.xxSmall) {
+                    subtitleText(subtitle)
+                    if let subtitleAccessory {
+                        subtitleAccessory
+                    }
+                    if let subtitleTail, !subtitleTail.isEmpty {
+                        subtitleText(subtitleTail)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-
-            Spacer(minLength: AppStyle.Spacing.medium)
-
-            trailing()
         }
         .padding(.horizontal, AppDetailPageLayout.horizontalInset)
         .padding(.top, AppDetailPageLayout.topContentInset)

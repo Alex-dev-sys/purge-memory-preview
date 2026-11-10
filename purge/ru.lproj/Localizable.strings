@@ -152,7 +152,7 @@
 "Chromium profile caches, per browser profile" = "Кэши профиля Chromium в зависимости от профиля браузера";
 "Clean" = "Очистить";
 "Clean Safe Files" = "Очистить безопасные файлы";
-"Clean Safe Items" = "Очистить безопасные элементы";
+"Clean Safe Items" = "Безопасная очистка";
 "Clean Safe Junk" = "Очистить безопасный мусор";
 "Clean Selected" = "Очистить выбранное";
 "Clean anyway" = "Всё равно очистить";
@@ -320,7 +320,7 @@
 "Logs" = "Журналы";
 "Leftover macOS update files" = "Оставшиеся файлы обновления macOS";
 "Logs, crash reports, and update leftovers" = "Логи, отчеты о сбоях и обновление остатков";
-"Look deeper" = "Смотри глубже.";
+"Look deeper" = "Доступ к диску";
 "Looking deeper" = "смотреть глубже";
 "Named like this app's Preferences or Caches identifier" = "Названы предпочтения или идентификатор кэша этого приложения";
 "Seen in use by this app while it was installed" = "Виден в использовании этим приложением, когда он был установлен";
@@ -543,7 +543,7 @@
 "Scan complete" = "Сканирование завершено";
 "Scan for Junk" = "Найти ненужные файлы";
 "Scan progress" = "Ход сканирования";
-"Scanned %@" = "Сканированный %@";
+"Scanned %@" = "Проверено %@";
 "Scanning" = "Сканирование";
 "Scanning %@…" = "Сканирование %@...";
 "Scanning app caches" = "Сканирование кэшей приложений";
