@@ -14,19 +14,19 @@
               }
             }
           ],
-          "glass" : true,
+          "glass" : false,
           "hidden" : false,
-          "image-name" : "p 2.svg",
-          "name" : "p 2"
+          "image-name" : "purge-mark.svg",
+          "name" : "Purge mark"
         }
       ],
       "shadow" : {
         "kind" : "neutral",
-        "opacity" : 0.5
+        "opacity" : 0.18
       },
       "translucency" : {
-        "enabled" : true,
-        "value" : 0.5
+        "enabled" : false,
+        "value" : 0
       }
     }
   ],
