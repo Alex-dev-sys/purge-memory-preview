@@ -50,16 +50,18 @@ struct MemoryView: View {
     private var pressureSummary: some View {
         VStack(alignment: .leading, spacing: AppStyle.Spacing.small) {
             HStack(alignment: .firstTextBaseline) {
-                Label(memoryText("Memory Pressure"), systemImage: "memorychip")
+                Label(memoryText("Memory status"), systemImage: "memorychip")
                     .font(AppStyle.Typography.sectionTitle)
                 Spacer()
-                Text(model.pressure.title).font(AppStyle.Typography.sectionTitle)
-                    .foregroundStyle(model.pressure.color)
+                if model.pressure != .unknown {
+                    Text(model.pressure.title).font(AppStyle.Typography.sectionTitle)
+                        .foregroundStyle(model.pressure.color)
+                }
             }
             Text(memoryText("macOS manages memory automatically. Free RAM is not a health score."))
                 .font(AppStyle.Typography.body).foregroundStyle(AppColors.textSecondary)
             if model.pressure == .unknown {
-                Text(memoryText("Waiting for a pressure event. Silence does not mean Normal."))
+                Text(memoryText("macOS hasn't reported the memory state yet."))
                     .font(AppStyle.Typography.callout).foregroundStyle(AppColors.textSecondary)
             }
             if let date = model.snapshot?.sampledAt {
@@ -193,7 +195,9 @@ struct MemoryMenuLabel: View {
         HStack {
             Image(systemName: "memorychip")
             Text(MemoryFormat.bytes(model.snapshot?.used))
-            Text(model.pressure.title)
+            if model.pressure != .unknown {
+                Text(model.pressure.title)
+            }
         }
         .accessibilityLabel(memoryText("Memory"))
         .onAppear { AppWindowPresenter.registerOpenWindowAction(openWindow) }
@@ -203,7 +207,9 @@ struct MemoryMenuLabel: View {
 struct MemoryMenuContent: View {
     @ObservedObject var model: MemoryCoordinator
     var body: some View {
-        Text(model.pressure.title)
+        if model.pressure != .unknown {
+            Text(model.pressure.title)
+        }
         Text(MemoryFormat.bytes(model.snapshot?.used))
         if model.statsUnavailable { Text(memoryText("Stale reading")) }
         Button(memoryText("Open Memory")) { model.openMemory() }

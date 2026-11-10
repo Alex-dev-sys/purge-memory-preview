@@ -43,7 +43,7 @@
 "History is unavailable. The existing archive was preserved; monitoring can continue." = "История недоступна. Существующий архив сохранён; наблюдение продолжается.";
 "Identity changed" = "Идентичность изменилась";
 "Memory" = "Память";
-"Memory Pressure" = "Давление памяти";
+"Memory status" = "Состояние памяти";
 "Memory history" = "История памяти";
 "Memory use" = "Объём памяти";
 "Name" = "Имя";
@@ -97,7 +97,7 @@
 "Unknown process" = "Неизвестный процесс";
 "Unsaved work may exist in every application, including those marked Safe to Quit." = "Несохранённые данные возможны в любом приложении, включая отмеченные как «Можно запросить выход».";
 "Used (estimate)" = "Занятая (оценка)";
-"Waiting for a pressure event. Silence does not mean Normal." = "Ожидание события давления. Отсутствие событий не означает нормальное состояние.";
+"macOS hasn't reported the memory state yet." = "macOS пока не сообщила о состоянии памяти.";
 "Warning" = "Повышенное";
 "Wired" = "Зарезервированная системой";
 "macOS manages memory automatically. Free RAM is not a health score." = "macOS управляет памятью автоматически. Свободная память не показатель здоровья системы.";

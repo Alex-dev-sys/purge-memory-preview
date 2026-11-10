@@ -43,7 +43,7 @@
 "History is unavailable. The existing archive was preserved; monitoring can continue." = "History is unavailable. The existing archive was preserved; monitoring can continue.";
 "Identity changed" = "Identity changed";
 "Memory" = "Memory";
-"Memory Pressure" = "Memory Pressure";
+"Memory status" = "Memory status";
 "Memory history" = "Memory history";
 "Memory use" = "Memory use";
 "Name" = "Name";
@@ -97,7 +97,7 @@
 "Unknown process" = "Unknown process";
 "Unsaved work may exist in every application, including those marked Safe to Quit." = "Unsaved work may exist in every application, including those marked Safe to Quit.";
 "Used (estimate)" = "Used (estimate)";
-"Waiting for a pressure event. Silence does not mean Normal." = "Waiting for a pressure event. Silence does not mean Normal.";
+"macOS hasn't reported the memory state yet." = "macOS hasn't reported the memory state yet.";
 "Warning" = "Warning";
 "Wired" = "Wired";
 "macOS manages memory automatically. Free RAM is not a health score." = "macOS manages memory automatically. Free RAM is not a health score.";

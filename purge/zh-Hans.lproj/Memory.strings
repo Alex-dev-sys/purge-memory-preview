@@ -43,7 +43,7 @@
 "History is unavailable. The existing archive was preserved; monitoring can continue." = "历史记录不可用。现有存档已保留，监控可继续。";
 "Identity changed" = "进程身份已变更";
 "Memory" = "内存";
-"Memory Pressure" = "内存压力";
+"Memory status" = "内存状态";
 "Memory history" = "内存历史记录";
 "Memory use" = "内存使用量";
 "Name" = "名称";
@@ -97,7 +97,7 @@
 "Unknown process" = "未知进程";
 "Unsaved work may exist in every application, including those marked Safe to Quit." = "任何应用都可能有未保存的工作，包括标为可请求退出的应用。";
 "Used (estimate)" = "已用（估算）";
-"Waiting for a pressure event. Silence does not mean Normal." = "正在等待压力事件，没有事件不代表正常。";
+"macOS hasn't reported the memory state yet." = "macOS 尚未报告内存状态。";
 "Warning" = "警告";
 "Wired" = "联动内存";
 "macOS manages memory automatically. Free RAM is not a health score." = "macOS 自动管理内存，可用内存并非健康指标。";
