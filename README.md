@@ -40,7 +40,7 @@ Russian text covers the interface, safety explanations, Finder/Siri actions and 
 
 ## Memory
 
-Open **Memory** with **⌘6** to see memory status, estimated RAM usage, a recent-history graph and applications grouped with their helper processes.
+Open **Memory** with **⌘6** to see memory status, estimated RAM usage and a collapsible list of applications grouped with their helper processes. Applications eligible for a confirmed quit request appear first; protected or unavailable groups follow. Name and memory-use sorting apply within those sections.
 
 ### Clean memory
 

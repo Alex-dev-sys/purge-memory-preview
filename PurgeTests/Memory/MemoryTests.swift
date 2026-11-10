@@ -3,6 +3,36 @@ import Testing
 @testable import Purge
 
 @MainActor
+@Suite("Memory process list prioritizes available requests")
+struct MemoryProcessOrderingTests {
+    @Test func availableAppsPrecedeLargerProtectedProcesses() {
+        let small = MemoryFixtures.group(MemoryFixtures.record(pid: 41, footprint: 100, name: "Small"))
+        let large = MemoryFixtures.group(MemoryFixtures.record(pid: 42, footprint: 300, name: "Large"))
+        let protected = MemoryFixtures.group(MemoryFixtures.record(pid: 43, uid: 0, footprint: 10_000, name: "System"))
+        let sorted = MemoryProcessOrdering.sorted([protected, small, large], policy: MemoryFixtures.policy,
+                                                 exclusions: [], byName: false)
+        #expect(sorted.map(\.root.identity.pid) == [42, 41, 43])
+    }
+
+    @Test func alphabeticalSortingStaysInsideTheAvailabilitySections() {
+        let zeta = MemoryFixtures.group(MemoryFixtures.record(pid: 41, name: "Zeta"))
+        let beta = MemoryFixtures.group(MemoryFixtures.record(pid: 42, name: "Beta"))
+        let alpha = MemoryFixtures.group(MemoryFixtures.record(pid: 43, uid: 0, name: "Alpha"))
+        let sorted = MemoryProcessOrdering.sorted([alpha, zeta, beta], policy: MemoryFixtures.policy,
+                                                 exclusions: [], byName: true)
+        #expect(sorted.map(\.root.identity.pid) == [42, 41, 43])
+    }
+
+    @Test func excludedAndPartiallyUnmeasuredGroupsAreNotRequestable() {
+        let root = MemoryFixtures.record()
+        let valid = MemoryFixtures.group(root)
+        let incomplete = MemoryProcessGroup(root: root, members: [root, MemoryFixtures.record(pid: 43, footprint: nil)], sampledAt: Date())
+        #expect(!MemoryProcessOrdering.isRequestable(incomplete, policy: MemoryFixtures.policy, exclusions: []))
+        #expect(!MemoryProcessOrdering.isRequestable(valid, policy: MemoryFixtures.policy, exclusions: ["com.apple.calculator"]))
+    }
+}
+
+@MainActor
 private enum MemoryFixtures {
     static let policy = MemorySafetyPolicy(currentUID: 501, ownPID: 999, ownBundleID: "test.purge",
                                            ownBundlePath: "/Applications/Purge.app")

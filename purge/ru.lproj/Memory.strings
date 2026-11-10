@@ -156,3 +156,9 @@
 "Selected: %@" = "Выбрано: %@";
 "Used memory" = "Используется";
 "of %@" = "из %@";
+
+/* Collapsible process list sections. */
+"Expanded" = "Развёрнуто";
+"Collapsed" = "Свёрнуто";
+"Can be closed" = "Можно завершить";
+"Protected or unavailable" = "Защищены или недоступны";

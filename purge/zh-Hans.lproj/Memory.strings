@@ -156,3 +156,9 @@
 "Selected: %@" = "已选：%@";
 "Used memory" = "已使用内存";
 "of %@" = "共 %@";
+
+/* Collapsible process list sections. */
+"Expanded" = "已展开";
+"Collapsed" = "已折叠";
+"Can be closed" = "可请求退出";
+"Protected or unavailable" = "受保护或不可用";

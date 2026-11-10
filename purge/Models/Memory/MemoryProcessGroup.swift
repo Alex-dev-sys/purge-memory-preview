@@ -69,3 +69,25 @@ nonisolated struct MemoryProcessSample: Sendable {
     let sampledAt: Date
     let isPartial: Bool
 }
+
+/// Requestable applications always precede protected or unmeasured groups;
+/// the user's selected sort applies independently inside those two sections.
+nonisolated enum MemoryProcessOrdering {
+    static func isRequestable(_ group: MemoryProcessGroup, policy: MemorySafetyPolicy, exclusions: Set<String>) -> Bool {
+        group.footprint != nil && policy.classify(group.root, exclusions: exclusions) != .protected
+    }
+
+    static func sorted(_ groups: [MemoryProcessGroup], policy: MemorySafetyPolicy,
+                       exclusions: Set<String>, byName: Bool) -> [MemoryProcessGroup] {
+        let ranked = groups.map { group in
+            (group: group, requestable: isRequestable(group, policy: policy, exclusions: exclusions), footprint: group.footprint)
+        }
+        return ranked.sorted { lhs, rhs in
+            if lhs.requestable != rhs.requestable { return lhs.requestable }
+            if !byName, lhs.footprint != rhs.footprint { return (lhs.footprint ?? -1) > (rhs.footprint ?? -1) }
+            let names = lhs.group.title.localizedStandardCompare(rhs.group.title)
+            if names != .orderedSame { return names == .orderedAscending }
+            return lhs.group.root.identity.pid < rhs.group.root.identity.pid
+        }.map { $0.group }
+    }
+}

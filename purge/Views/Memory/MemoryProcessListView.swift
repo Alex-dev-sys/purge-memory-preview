@@ -25,7 +25,8 @@ struct MemoryProcessListView: View {
     @State private var confirmation: MemoryConfirmation?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppStyle.Spacing.small) {
+        let displayedGroups = groups
+        return VStack(alignment: .leading, spacing: AppStyle.Spacing.small) {
             HStack(spacing: AppStyle.Spacing.xSmall) {
                 CapsuleSearchField(query: $search,
                     prompt: LocalizedStringKey(memoryText("Search applications")),
@@ -69,10 +70,20 @@ struct MemoryProcessListView: View {
                     .font(AppStyle.Typography.metadata).foregroundStyle(AppColors.textSecondary)
             }
             LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
+                ForEach(Array(displayedGroups.enumerated()), id: \.element.id) { index, group in
+                    let requestable = isRequestable(group)
                     if index > 0 {
                         Rectangle().fill(AppColors.borderSubtle).frame(height: 1)
                             .padding(.horizontal, AppStyle.Spacing.medium)
+                    }
+                    if index == 0 || requestable != isRequestable(displayedGroups[index - 1]) {
+                        Label(requestable ? memoryText("Can be closed") : memoryText("Protected or unavailable"),
+                              systemImage: requestable ? "app" : "lock")
+                            .font(AppStyle.Typography.metadataEmphasis)
+                            .foregroundStyle(AppColors.textSecondary)
+                            .padding(.horizontal, AppStyle.Spacing.medium)
+                            .padding(.top, AppStyle.Spacing.small)
+                            .accessibilityAddTraits(.isHeader)
                     }
                     processRow(group)
                 }
@@ -80,12 +91,16 @@ struct MemoryProcessListView: View {
             .overviewCard()
             if source.sample == nil && !source.unavailable {
                 ProgressView(memoryText("Reading processes…"))
-            } else if groups.isEmpty && !source.unavailable {
+            } else if displayedGroups.isEmpty && !source.unavailable {
                 Text(memoryText("No matching processes.")).font(AppStyle.Typography.body)
             }
         }
         .onChange(of: source.sample?.sampledAt) { _ in
             selected.formIntersection(Set((source.sample?.groups ?? []).map(\.id)))
+        }
+        .onDisappear {
+            actions.foregroundEnded()
+            actions.cancelConfirmation()
         }
         .sheet(item: $confirmation) { value in
             MemoryActionConfirmationView(confirmation: value, policy: actions.policy, exclusions: settings.exclusions) {
@@ -107,14 +122,17 @@ struct MemoryProcessListView: View {
             search.isEmpty || $0.title.localizedCaseInsensitiveContains(search)
                 || ($0.bundleID?.localizedCaseInsensitiveContains(search) ?? false)
         }
-        return sortByName ? filtered.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending } : filtered
+        return MemoryProcessOrdering.sorted(filtered, policy: actions.policy, exclusions: settings.exclusions, byName: sortByName)
+    }
+    private func isRequestable(_ group: MemoryProcessGroup) -> Bool {
+        MemoryProcessOrdering.isRequestable(group, policy: actions.policy, exclusions: settings.exclusions)
     }
     private func prepare(action: MemoryAction) {
         let targets = (source.sample?.groups ?? []).filter { selected.contains($0.id) }
         confirmation = actions.confirmation(targets, action: action)
     }
     private func processRow(_ group: MemoryProcessGroup) -> some View {
-        let safety = actions.policy.classify(group.root, exclusions: settings.exclusions)
+        let safety: MemorySafety = isRequestable(group) ? actions.policy.classify(group.root, exclusions: settings.exclusions) : .protected
         return DisclosureGroup {
             VStack(alignment: .leading, spacing: AppStyle.Spacing.xxSmall) {
                 Text(group.explanation).font(AppStyle.Typography.callout).foregroundStyle(AppColors.textSecondary)

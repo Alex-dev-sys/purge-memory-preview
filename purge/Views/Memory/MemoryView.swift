@@ -1,5 +1,4 @@
 import AppKit
-import Charts
 import SwiftUI
 
 extension MemoryPressure {
@@ -13,15 +12,11 @@ extension MemoryPressure {
     }
 }
 
-private enum MemoryLayout {
-    static let chartHeight: CGFloat = 140 // Fixed plot geometry, not spacing.
-}
-
 struct MemoryView: View {
     @ObservedObject var model: MemoryCoordinator
     @State private var pageID = UUID()
-    @State private var range: TimeInterval = 60
     @State private var showHistory = false
+    @State private var applicationsExpanded = true
     @State private var showReadingInfo = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -30,7 +25,6 @@ struct MemoryView: View {
             VStack(alignment: .leading, spacing: AppStyle.Spacing.large) {
                 summary
                 MemoryCleaningControls(cleanup: model.cleanup, settings: model.settings, actions: model.actions)
-                activityCard
                 applications
             }
             .padding(.horizontal, AppDetailPageLayout.horizontalInset)
@@ -122,12 +116,12 @@ struct MemoryView: View {
         GeometryReader { geometry in
             if let snapshot = model.snapshot, let remainder = snapshot.breakdownRemainder {
                 HStack(spacing: 0) {
-                    segment(snapshot.app, total: snapshot.total, width: geometry.size.width, color: AppColors.Chart.appCaches)
-                    segment(snapshot.wired, total: snapshot.total, width: geometry.size.width, color: AppColors.Chart.devTools)
-                    segment(snapshot.compressed, total: snapshot.total, width: geometry.size.width, color: AppColors.Chart.largeFiles)
-                    segment(snapshot.cached, total: snapshot.total, width: geometry.size.width, color: AppColors.Chart.apps)
-                    segment(snapshot.free, total: snapshot.total, width: geometry.size.width, color: AppColors.Chart.freeSpace)
-                    segment(remainder, total: snapshot.total, width: geometry.size.width, color: AppColors.fillSecondary)
+                    segment(snapshot.app, total: snapshot.total, width: geometry.size.width, color: AppColors.Chart.appCaches, label: memoryText("Applications"))
+                    segment(snapshot.wired, total: snapshot.total, width: geometry.size.width, color: AppColors.Chart.devTools, label: memoryText("System"))
+                    segment(snapshot.compressed, total: snapshot.total, width: geometry.size.width, color: AppColors.Chart.largeFiles, label: memoryText("Compressed"))
+                    segment(snapshot.cached, total: snapshot.total, width: geometry.size.width, color: AppColors.Chart.apps, label: memoryText("File cache"))
+                    segment(snapshot.free, total: snapshot.total, width: geometry.size.width, color: AppColors.Chart.freeSpace, label: memoryText("Free"))
+                    segment(remainder, total: snapshot.total, width: geometry.size.width, color: AppColors.fillSecondary, label: memoryText("The neutral remainder is not accounted for by these estimates."))
                 }
             } else {
                 AppColors.fillSecondary
@@ -138,136 +132,43 @@ struct MemoryView: View {
         .accessibilityLabel(memoryText("Estimated memory breakdown"))
     }
 
-    private func segment(_ bytes: Int64?, total: Int64, width: CGFloat, color: Color) -> some View {
+    private func segment(_ bytes: Int64?, total: Int64, width: CGFloat, color: Color, label: String) -> some View {
         color.frame(width: width * CGFloat(bytes ?? 0) / CGFloat(max(total, 1)))
-    }
-
-    private var activityCard: some View {
-        VStack(alignment: .leading, spacing: AppStyle.Spacing.medium) {
-            HStack(spacing: AppStyle.Spacing.small) {
-                Text(memoryText("Memory activity")).font(AppStyle.Typography.headline)
-                    .foregroundStyle(AppColors.textPrimary)
-                Spacer(minLength: AppStyle.Spacing.small)
-                SettingsMenuPicker(selection: $range, options: [TimeInterval(60), 300, 3600],
-                    optionLabel: { value in
-                        value == 60 ? memoryText("60 seconds") : value == 300 ? memoryText("5 minutes") : memoryText("1 hour")
-                    }, accessibilityTitle: memoryText("Graph range"))
-            }
-            chart
-            Rectangle().fill(AppColors.borderSubtle).frame(height: 1)
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 5),
-                      alignment: .leading, spacing: AppStyle.Spacing.medium) {
-                metric(memoryText("Applications"), model.snapshot?.app, color: AppColors.Chart.appCaches,
-                       help: memoryText("App Memory (estimate)"))
-                metric(memoryText("System"), model.snapshot?.wired, color: AppColors.Chart.devTools,
-                       help: memoryText("Wired memory reserved by macOS."))
-                metric(memoryText("Compressed"), model.snapshot?.compressed, color: AppColors.Chart.largeFiles,
-                       help: memoryText("Compressed"))
-                metric(memoryText("File cache"), model.snapshot?.cached, color: AppColors.Chart.apps,
-                       help: memoryText("Cached Files (estimate)"))
-                metric(memoryText("Swap"), model.snapshot?.swap, color: nil,
-                       help: memoryText("Swap Used"))
-            }
-            if model.statsUnavailable {
-                Text(memoryText("Stale reading")).font(AppStyle.Typography.metadata)
-                    .foregroundStyle(AppColors.statusCheckText)
-            }
-        }
-        .padding(AppStyle.Spacing.medium)
-        .overviewCard()
-    }
-
-    private func metric(_ title: String, _ bytes: Int64?, color: Color?, help: String) -> some View {
-        VStack(alignment: .leading, spacing: AppStyle.Spacing.xxSmallPlus) {
-            HStack(spacing: AppStyle.Spacing.xxSmall) {
-                if let color {
-                    Circle().fill(color).frame(width: AppStyle.Spacing.xxSmallPlus, height: AppStyle.Spacing.xxSmallPlus)
-                }
-                Text(title).font(AppStyle.Typography.metadata).foregroundStyle(AppColors.textSecondary)
-                    .lineLimit(1)
-            }
-            Text(MemoryFormat.bytes(bytes)).font(AppStyle.Typography.sectionTitle.numbers)
-                .foregroundStyle(AppColors.textPrimary).monospacedDigit().lineLimit(1).minimumScaleFactor(0.8)
-        }
-        .help(help).accessibilityElement(children: .combine)
-    }
-
-    private var chart: some View {
-        let now = Date()
-        let points = chartPoints
-        let total = max(model.snapshot?.total ?? 1, 1)
-        return Chart(points, id: \.sample.id) { point in
-            if let used = point.sample.used {
-                AreaMark(x: .value(memoryText("Time"), point.sample.sampledAt),
-                         y: .value(memoryText("Used (estimate)"), used),
-                         series: .value(memoryText("Observation segment"), point.segment), stacking: .unstacked)
-                    .foregroundStyle(LinearGradient(colors: [AppColors.Chart.devTools.opacity(0.18),
-                                                             AppColors.Chart.devTools.opacity(0.02)],
-                                                    startPoint: .top, endPoint: .bottom))
-                LineMark(x: .value(memoryText("Time"), point.sample.sampledAt),
-                         y: .value(memoryText("Used (estimate)"), used),
-                         series: .value(memoryText("Observation segment"), point.segment))
-                    .foregroundStyle(AppColors.Chart.devTools)
-                    .lineStyle(StrokeStyle(lineWidth: 2))
-            }
-        }
-        .chartLegend(.hidden)
-        .chartXScale(domain: now.addingTimeInterval(-range)...now)
-        .chartYScale(domain: Int64(0)...total)
-        .chartXAxis {
-            AxisMarks(values: .automatic(desiredCount: 3)) {
-                AxisValueLabel().font(AppStyle.Typography.metadata.font)
-                    .foregroundStyle(AppColors.textTertiary)
-            }
-        }
-        .chartYAxis {
-            AxisMarks(position: .trailing, values: total > 1 ? [Int64(0), total / 2, total] : []) { value in
-                AxisGridLine().foregroundStyle(AppColors.borderSubtle)
-                AxisValueLabel {
-                    if let bytes = value.as(Int64.self) {
-                        Text(MemoryFormat.bytes(bytes)).font(AppStyle.Typography.metadata.numbers)
-                            .foregroundStyle(AppColors.textTertiary)
-                    }
-                }
-            }
-        }
-        .frame(height: MemoryLayout.chartHeight)
-        .overlay {
-            if !points.contains(where: { $0.sample.used != nil }) {
-                Text(model.statsUnavailable ? memoryText("Unavailable") : memoryText("Reading memory…"))
-                    .font(AppStyle.Typography.callout).foregroundStyle(AppColors.textTertiary)
-            }
-        }
-        .accessibilityLabel(memoryText("Estimated used memory over time. Gaps indicate missing observations."))
+            .help(label + ": " + MemoryFormat.bytes(bytes))
     }
 
     private var applications: some View {
         VStack(alignment: .leading, spacing: AppStyle.Spacing.small) {
             HStack {
-                Text(memoryText("Applications and processes")).font(AppStyle.Typography.headline)
+                Button {
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                        applicationsExpanded.toggle()
+                    }
+                } label: {
+                    HStack(spacing: AppStyle.Spacing.xSmall) {
+                        Image(systemName: applicationsExpanded ? "chevron.down" : "chevron.right")
+                            .font(AppStyle.Typography.metadata.weight(.semibold))
+                            .foregroundStyle(AppColors.textSecondary)
+                            .frame(width: AppStyle.Spacing.small)
+                        Text(memoryText("Applications and processes")).font(AppStyle.Typography.headline)
+                            .foregroundStyle(AppColors.textPrimary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityValue(applicationsExpanded ? memoryText("Expanded") : memoryText("Collapsed"))
                 Spacer(minLength: AppStyle.Spacing.small)
                 Button { showHistory = true } label: {
                     Label(memoryText("Memory history"), systemImage: "clock.arrow.circlepath")
                 }.buttonStyle(.purge(.secondary, size: .small))
             }
-            MemoryProcessListView(source: model.processStore, actions: model.actions,
-                                  settings: model.settings, total: model.snapshot?.total)
+            if applicationsExpanded {
+                MemoryProcessListView(source: model.processStore, actions: model.actions,
+                                      settings: model.settings, total: model.snapshot?.total)
+            }
         }
     }
 
-    private var chartPoints: [(sample: MemorySnapshot, segment: Int)] {
-        var segment = 0
-        var previous: MemoryChartEntry?
-        return model.chart.entries.filter { $0.snapshot.sampledAt >= Date().addingTimeInterval(-range) }.map { entry in
-            if entry.snapshot.used == nil { segment += 1; previous = nil; return (entry.snapshot, segment) }
-            if let previous, previous.generation != entry.generation
-                || entry.snapshot.sampledAt.timeIntervalSince(previous.snapshot.sampledAt) > max(entry.interval, previous.interval) * 1.5 {
-                segment += 1
-            }
-            previous = entry
-            return (entry.snapshot, segment)
-        }
-    }
 }
 
 private struct MemoryWindowReader: NSViewRepresentable {

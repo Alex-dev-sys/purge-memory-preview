@@ -156,3 +156,9 @@
 "Selected: %@" = "Selected: %@";
 "Used memory" = "Used memory";
 "of %@" = "of %@";
+
+/* Collapsible process list sections. */
+"Expanded" = "Expanded";
+"Collapsed" = "Collapsed";
+"Can be closed" = "Can be closed";
+"Protected or unavailable" = "Protected or unavailable";
