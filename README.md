@@ -350,6 +350,9 @@ builds and tests the app, then publishes a GitHub prerelease containing a univer
 Apple Silicon / Intel DMG and `SHA256SUMS.txt`. The DMG is also saved as an Actions
 artifact. No Apple signing secrets are required: the preview is ad-hoc signed and
 is not notarized.
+Preview builds disable Hardened Runtime because their ad-hoc identity cannot
+match Sparkle's Developer ID signature. CI launches the built app before packaging
+to catch dynamic-library loading failures as well as signature verification errors.
 
 Tests and universal packaging run in parallel; publication waits for both to pass.
 The checks workflow is reused rather than running the same tests twice on each
