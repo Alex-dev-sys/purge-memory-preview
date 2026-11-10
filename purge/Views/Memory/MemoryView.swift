@@ -32,7 +32,8 @@ struct MemoryView: View {
             .padding(.bottom, AppStyle.Spacing.large)
         }
         .background(AppColors.surfaceBase)
-        .background(MemoryWindowReader { model.page(pageID, window: $0) })
+        .background(MemoryWindowReader { model.page(pageID, window: $0, processesVisible: applicationsExpanded) })
+        .onChange(of: applicationsExpanded) { model.processDetails(pageID, visible: $0) }
         .onDisappear { model.page(pageID, window: nil) }
         .sheet(isPresented: $showHistory) { MemoryHistoryView(history: model.history) }
     }

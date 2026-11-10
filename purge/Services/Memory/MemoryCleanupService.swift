@@ -22,6 +22,7 @@ final class MemoryCleanupService: ObservableObject {
     private var policy = MemoryCleanupPolicy()
     private var configuration = ""
     private var monitor: Task<Void, Never>?
+    private var started = false
     private var sleeping = false
     private var exiting = false
 
@@ -76,6 +77,7 @@ final class MemoryCleanupService: ObservableObject {
     }
 
     func configure() {
+        defer { reconcileMonitor() }
         let key = "\(settings.automaticCleaning):\(settings.cleaningMode):\(settings.cleaningInterval):\(settings.cleaningThreshold)"
         guard key != configuration else { return }
         configuration = key
@@ -84,10 +86,23 @@ final class MemoryCleanupService: ObservableObject {
     }
 
     func start() {
-        guard monitor == nil, !TestHost.isActive() else { return }
-        exiting = false; configure()
+        guard !started, !TestHost.isActive() else { return }
+        started = true
+        exiting = false
+        Task { [weak self] in await self?.refreshPermission() }
+        configure()
+    }
+
+    private func reconcileMonitor() {
+        guard started, settings.automaticCleaning, !sleeping, !exiting else {
+            // Disabling the schedule or sleeping stops future ticks. An already
+            // submitted system request must still be observed and recorded.
+            if isBusy && !exiting { return }
+            monitor?.cancel(); monitor = nil
+            return
+        }
+        guard monitor == nil else { return }
         monitor = Task { [weak self] in
-            await self?.refreshPermission()
             while !Task.isCancelled {
                 guard let self else { return }
                 await self.tick()
@@ -113,6 +128,7 @@ final class MemoryCleanupService: ObservableObject {
         policy.reset(now: now(), intervalMinutes: settings.cleaningInterval)
         policy.usageLatched = latched
         nextDate = settings.automaticCleaning && settings.cleaningMode == .timer ? policy.nextDate : nil
+        reconcileMonitor()
     }
 
     func clean(trigger: MemoryCleanupTrigger = .manual) async {
@@ -128,7 +144,7 @@ final class MemoryCleanupService: ObservableObject {
         // share this gate, and process termination actions consult it too.
         guard !isBusy, !exiting, !isBlocked() else { return }
         isBusy = true; message = nil; lastBeforeFree = nil; lastAfterFree = nil
-        defer { isBusy = false }
+        defer { isBusy = false; reconcileMonitor() }
         let date = now()
         settings.lastCleaningAttempt = date
         policy.attempted(now: date, intervalMinutes: settings.cleaningInterval)
@@ -178,6 +194,6 @@ final class MemoryCleanupService: ObservableObject {
     }
 
     func shutdown() {
-        exiting = true; monitor?.cancel(); monitor = nil
+        exiting = true; started = false; monitor?.cancel(); monitor = nil
     }
 }

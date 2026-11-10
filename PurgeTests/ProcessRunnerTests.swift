@@ -15,6 +15,63 @@ struct ProcessRunnerTests {
         ProcessRunner.run(executablePath: "/bin/sh", arguments: ["-c", script], timeout: timeout)
     }
 
+    @Test("Cancellation reaps an already running child, even with closed output pipes", arguments: [false, true])
+    func cancellationStopsRunningChild(closesPipes: Bool) async throws {
+        let signal = FileManager.default.temporaryDirectory.appendingPathComponent("purge-cancel-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: signal) }
+        let cancellation = CancellationFlag()
+        let script = "echo $$ > \"$1\"; " + (closesPipes ? "exec 1>&- 2>&-; " : "") + "exec /bin/sleep 60"
+        let task = Task.detached {
+            ProcessRunner.run(executablePath: "/bin/sh", arguments: ["-c", script, "sh", signal.path],
+                              timeout: 30, isCancelled: { cancellation.isRaised })
+        }
+        #expect(await eventually {
+            guard let text = try? String(contentsOf: signal, encoding: .utf8) else { return false }
+            return Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) != nil
+        })
+        let pid = try #require(Int32(try String(contentsOf: signal, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+        let started = ContinuousClock.now
+        cancellation.raise()
+        let result = try #require(await task.value)
+        #expect(result.cancelled)
+        #expect(!result.timedOut)
+        #expect(!result.succeeded)
+        #expect(ContinuousClock.now - started < .seconds(10))
+        #expect(kill(pid, 0) == -1 && errno == ESRCH)
+    }
+
+    @Test("An already cancelled read never launches its child")
+    func cancellationBeforeLaunch() async {
+        let result = ProcessRunner.run(executablePath: "/bin/sleep", arguments: ["60"], timeout: 30,
+                                       isCancelled: { true })
+        #expect(result == nil)
+    }
+
+    @Test("Folder sizing can cancel through its Swift task context")
+    func taskCancellationStopsRunningChild() async throws {
+        let signal = FileManager.default.temporaryDirectory.appendingPathComponent("purge-task-cancel-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: signal) }
+        let task = Task.detached {
+            ProcessRunner.run(executablePath: "/bin/sh",
+                arguments: ["-c", "echo ready > \"$1\"; exec /bin/sleep 60", "sh", signal.path],
+                timeout: 30, isCancelled: { Task.isCancelled })
+        }
+        #expect(await eventually { FileManager.default.fileExists(atPath: signal.path) })
+        task.cancel()
+        let result = try #require(await task.value)
+        #expect(result.cancelled)
+        #expect(!result.succeeded)
+    }
+
+    @Test("Closing output pipes does not bypass the timeout")
+    func closedPipesStillRespectTimeout() async throws {
+        let started = ContinuousClock.now
+        let result = try #require(runShell("exec 1>&- 2>&-; exec /bin/sleep 60", timeout: 1))
+        #expect(result.timedOut)
+        #expect(!result.succeeded)
+        #expect(ContinuousClock.now - started < .seconds(10))
+    }
+
     @Test("Output larger than the pipe buffer comes back whole")
     func drainsLargeStdout() async throws {
         let bytes = Self.floodBytes

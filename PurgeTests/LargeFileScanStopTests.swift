@@ -9,6 +9,41 @@ import Testing
 @Suite("A stopped Large Files scan does not count as finished")
 struct LargeFileScanStopTests {
 
+    @Test("A short batch becomes visible while the scanner is waiting")
+    func shortBatchPublishesBeforeTheStreamFinishes() async {
+        let fake = FakeScans()
+        defer { fake.cleanUp() }
+        fake.hasAccess = true
+        fake.holdsLargeFiles = true
+        fake.largeFileEvents = [
+            .file(file("/Users/someone/Movies/small.mov", bytes: 100_000_000)),
+            .file(file("/Users/someone/Movies/large.mov", bytes: 200_000_000)),
+        ]
+        let store = fake.makeStore()
+        let scan = Task { await store.scanLargeFiles() }
+        #expect(await eventually { store.largeFiles.count == 2 })
+        #expect(store.largeFiles.map(\.sizeBytes) == [200_000_000, 100_000_000])
+        #expect(store.isScanningLargeFiles)
+        scan.cancel()
+        await scan.value
+        #expect(!store.hasSessionResults(for: .largeFiles))
+    }
+
+    @Test("A fast stream publishes its entire sorted result at completion")
+    func finalPublicationIncludesTheTrailingBatch() async {
+        let fake = FakeScans()
+        defer { fake.cleanUp() }
+        fake.hasAccess = true
+        fake.largeFileEvents = (0..<103).map {
+            .file(file("/Users/someone/Movies/clip-\($0).mov", bytes: 100_000_000 + Int64($0)))
+        }
+        let store = fake.makeStore()
+        await store.scanLargeFiles()
+        #expect(store.largeFiles.count == 103)
+        #expect(store.largeFiles.map(\.sizeBytes) == (0..<103).reversed().map { 100_000_000 + Int64($0) })
+        #expect(store.hasSessionResults(for: .largeFiles))
+    }
+
     /// Stop during the first scan of a session: nothing finished, so nothing is recorded.
     @Test
     func aFirstScanStoppedMidStreamWritesNoRecord() async {
@@ -91,7 +126,7 @@ struct LargeFileScanStopTests {
         #expect(finished?.bytes == clipBytes)
         #expect(finished?.count == 25)
 
-        // The rescan lists the same rows again (published once 25 have arrived) and
+        // The rescan lists the same rows again in a coalesced publication and
         // is stopped. The first scan's rows are on the tab until the rescan clears
         // them, so wait for the rescan's walk to have started as well.
         fake.holdsLargeFiles = true

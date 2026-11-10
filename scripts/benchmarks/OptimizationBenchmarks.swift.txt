@@ -1,0 +1,191 @@
+import AppKit
+import Combine
+import Darwin
+import Foundation
+import Testing
+@testable import Purge
+
+private struct BenchCounters {
+    var cpu: Double
+    var rss: UInt64
+    var footprint: UInt64
+    static func read() -> Self {
+        var usage = rusage()
+        getrusage(RUSAGE_SELF, &usage)
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.stride / MemoryLayout<integer_t>.stride)
+        let capacity = Int(count)
+        let status = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: capacity) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        precondition(status == KERN_SUCCESS)
+        let cpu = Double(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec)
+            + Double(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1_000_000
+        return Self(cpu: cpu, rss: info.resident_size, footprint: info.phys_footprint)
+    }
+}
+
+private actor BenchProcesses: ProcessMemoryProviding {
+    var calls = 0
+    let provider = ProcessMemoryProvider()
+    func sample(apps: [MemoryAppMetadata]) async -> MemoryProcessSample? {
+        calls += 1
+        return await provider.sample(apps: apps)
+    }
+    func record(pid: Int32, app: MemoryAppMetadata?) async -> MemoryProcessRecord? {
+        await provider.record(pid: pid, app: app)
+    }
+}
+
+@MainActor
+private final class BenchWindow: NSWindow {
+    override var isVisible: Bool { true }
+    override var isMiniaturized: Bool { false }
+    override var occlusionState: NSWindow.OcclusionState { .visible }
+}
+
+@MainActor
+@Suite(.serialized)
+struct OptimizationBenchmarks {
+    private static let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+    private func emit(_ values: [String: Any]) throws {
+        let data = try JSONSerialization.data(withJSONObject: values, options: [.sortedKeys])
+        let url = Self.root.appendingPathComponent("benchmark-results.jsonl")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: data + Data([10]))
+        print("PURGE-BENCH " + String(decoding: data, as: UTF8.self))
+    }
+    private func seconds(_ duration: Duration) -> Double {
+        Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
+    }
+    private func result(_ scenario: String, start: ContinuousClock.Instant, before: BenchCounters,
+                        extra: [String: Any] = [:]) throws {
+        let wall = seconds(ContinuousClock.now - start)
+        let after = BenchCounters.read()
+        var row: [String: Any] = ["scenario": scenario, "wall_ms": wall * 1000,
+            "cpu_ms": (after.cpu - before.cpu) * 1000,
+            "cpu_percent_one_core": (after.cpu - before.cpu) / wall * 100,
+            "rss_before_mb": Double(before.rss) / 1_048_576,
+            "rss_after_mb": Double(after.rss) / 1_048_576,
+            "footprint_before_mb": Double(before.footprint) / 1_048_576,
+            "footprint_after_mb": Double(after.footprint) / 1_048_576]
+        row.merge(extra, uniquingKeysWith: { _, new in new })
+        try emit(row)
+    }
+
+    @Test func measure() async throws {
+        // Warm the fixture and runtime; discard its measurements.
+        try await scan(count: 1000, iteration: -1)
+        for iteration in 0..<5 {
+            for count in [1000, 10000] { try await scan(count: count, iteration: iteration) }
+        }
+        for iteration in 0..<5 { try memoryGroups(iteration: iteration) }
+        for collapsed in [false, true] { try await observeMemory(collapsed: collapsed) }
+    }
+
+    private func scan(count: Int, iteration: Int) async throws {
+        let fake = FakeScans()
+        defer { fake.cleanUp() }
+        fake.hasAccess = true
+        fake.largeFileEvents = (0..<count).map { index in
+            let size = 100_000_000 + Int64((index * 7919) % count)
+            return .file(LargeFile(path: URL(fileURLWithPath: "/private/tmp/purge-benchmark-fixtures/clip-\(index).mov"),
+                sizeBytes: size, lastUsed: Date(timeIntervalSince1970: 1), category: .video, canMoveToTrash: false))
+        }
+        let store = fake.makeStore()
+        var publications = 0
+        let subscription = store.$largeFiles.dropFirst().sink { _ in publications += 1 }
+        var gaps: [Double] = []
+        let heartbeat = Task { @MainActor in
+            var previous = ContinuousClock.now
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(2)) } catch { return }
+                let now = ContinuousClock.now
+                gaps.append(seconds(now - previous) * 1000)
+                previous = now
+            }
+        }
+        try await Task.sleep(for: .milliseconds(10))
+        gaps.removeAll(keepingCapacity: true)
+        let before = BenchCounters.read()
+        let start = ContinuousClock.now
+        await store.scanLargeFiles()
+        let wall = seconds(ContinuousClock.now - start) * 1000
+        let after = BenchCounters.read()
+        try await Task.sleep(for: .milliseconds(5))
+        heartbeat.cancel()
+        subscription.cancel()
+        #expect(store.largeFiles.count == count)
+        #expect(zip(store.largeFiles, store.largeFiles.dropFirst()).allSatisfy { $0.sizeBytes >= $1.sizeBytes })
+        if iteration >= 0 {
+            try emit(["scenario": "large_files", "count": count, "iteration": iteration,
+                "wall_ms": wall, "cpu_ms": (after.cpu - before.cpu) * 1000,
+                "publications": publications, "main_actor_max_gap_ms": gaps.max() ?? 0,
+                "rss_before_mb": Double(before.rss) / 1_048_576, "rss_after_mb": Double(after.rss) / 1_048_576,
+                "footprint_before_mb": Double(before.footprint) / 1_048_576,
+                "footprint_after_mb": Double(after.footprint) / 1_048_576])
+        }
+    }
+
+    private func memoryGroups(iteration: Int) throws {
+        let policy = MemorySafetyPolicy(currentUID: getuid(), ownPID: -999, ownBundleID: "benchmark",
+                                        ownBundlePath: "/private/tmp/benchmark.app")
+        let before = BenchCounters.read()
+        let start = ContinuousClock.now
+        var checksum: Int64 = 0
+        // Include construction as well as sorting and repeated UI-style reads.
+        for sample in 0..<1000 {
+            let groups = (0..<200).map { index -> MemoryProcessGroup in
+                let pid = Int32(index + 1000)
+                let app = MemoryAppMetadata(pid: pid, bundleID: "com.apple.calculator", name: "App \(index)",
+                    bundlePath: "/Applications/Calculator.app", executablePath: "/Applications/Calculator.app/Contents/MacOS/Calculator", isRegular: true)
+                let members = (0..<8).map { child in
+                    MemoryProcessRecord(identity: MemoryProcessIdentity(pid: pid + Int32(child * 1000), seconds: 100, microseconds: 0),
+                        uid: getuid(), parentPID: 1, name: "Process", executablePath: app.executablePath,
+                        footprint: Int64(((index * 7919 + sample + child) % 10000) + 1), app: child == 0 ? app : nil)
+                }
+                return MemoryProcessGroup(root: members[0], members: members, sampledAt: Date(timeIntervalSince1970: Double(sample)))
+            }
+            let ordered = MemoryProcessOrdering.sorted(groups, policy: policy, exclusions: [], byName: false)
+            for group in ordered {
+                // Section classification, row safety, amount and percentage reads.
+                checksum &+= group.footprint ?? 0
+                checksum &+= group.footprint ?? 0
+                if MemoryProcessOrdering.isRequestable(group, policy: policy, exclusions: []) { checksum &+= 1 }
+            }
+        }
+        try result("memory_groups", start: start, before: before,
+                   extra: ["iteration": iteration, "samples": 1000, "groups": 200, "members": 8, "checksum": checksum])
+    }
+
+    private func observeMemory(collapsed: Bool) async throws {
+        let suite = ThrowawayDefaults()
+        let settings = MemorySettingsStore(defaults: suite.defaults)
+        let provider = BenchProcesses()
+        let before = BenchCounters.read()
+        let model = MemoryCoordinator(settings: settings, history: MemoryHistoryStore(), processes: provider)
+        let id = UUID()
+        let window = BenchWindow(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+                                 styleMask: [], backing: .buffered, defer: true)
+        let start = ContinuousClock.now
+        if collapsed {
+            #if BENCH_AFTER
+            model.page(id, window: window, processesVisible: false)
+            #else
+            model.page(id, window: window)
+            #endif
+        } else { model.start() }
+        try await Task.sleep(for: .seconds(30))
+        try result(collapsed ? "memory_collapsed_30s" : "memory_idle_30s", start: start, before: before,
+            extra: ["process_scans": await provider.calls, "cleanup_ticks": model.cleanup.benchmarkTicks])
+        model.shutdown()
+        try await Task.sleep(for: .milliseconds(300))
+    }
+}

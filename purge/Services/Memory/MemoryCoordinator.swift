@@ -21,15 +21,14 @@ final class MemoryCoordinator: ObservableObject {
     @Published private(set) var snapshot: MemorySnapshot?
     @Published private(set) var statsUnavailable = false
     @Published private(set) var pressure: MemoryPressure = .unknown
-    @Published private(set) var chart = MemoryChartBuffer()
     private let stats: any MemoryStatsProviding
     private let processes: any ProcessMemoryProviding
     private var pages: [UUID: NSWindow] = [:]
+    private var expandedPages: Set<UUID> = []
     private var foreground = false
     private var sleeping = false
     private var started = false
     private var samplingInterval: Double?
-    private var chartGeneration = 0
     private var aggregateTask: Task<Void, Never>?
     private var processTask: Task<Void, Never>?
     private var scan: (UUID, Task<MemoryProcessSample?, Never>)?
@@ -54,7 +53,6 @@ final class MemoryCoordinator: ObservableObject {
         cleanup.didSample = { [weak self] value in
             guard let self else { return }
             self.snapshot = value; self.statsUnavailable = false
-            self.chart.append(value, generation: self.chartGeneration, interval: self.samplingInterval ?? 10)
         }
         actions.cleaningIsBusy = { [weak cleanup] in cleanup?.isBusy == true || cleanup?.isAuthorizing == true }
         settings.onChange = { [weak self] in
@@ -87,6 +85,7 @@ final class MemoryCoordinator: ObservableObject {
             Task { @MainActor in
                 if self?.pages.values.contains(where: { $0 === window }) == true { self?.actions.foregroundEnded() }
                 self?.pages = self?.pages.filter { $0.value !== window } ?? [:]
+                if let self { self.expandedPages.formIntersection(self.pages.keys) }
                 self?.reconcile()
             }
         }.store(in: &subscriptions)
@@ -105,10 +104,18 @@ final class MemoryCoordinator: ObservableObject {
         reconcile()
     }
 
-    func page(_ id: UUID, window: NSWindow?) {
+    func page(_ id: UUID, window: NSWindow?, processesVisible: Bool = true) {
         if window == nil, pages[id] != nil { actions.foregroundEnded() }
         pages[id] = window
+        if window != nil && processesVisible { expandedPages.insert(id) }
+        else { expandedPages.remove(id) }
         start(); reconcile()
+    }
+
+    func processDetails(_ id: UUID, visible: Bool) {
+        if visible { expandedPages.insert(id) }
+        else { expandedPages.remove(id) }
+        reconcile()
     }
 
     private func reconcile() {
@@ -118,9 +125,15 @@ final class MemoryCoordinator: ObservableObject {
         }
         if foreground != active {
             foreground = active
-            processTask?.cancel(); processTask = nil
             if !active { actions.foregroundEnded(); scan?.1.cancel() }
-            if active {
+        }
+        let needsProcesses = active && pages.contains { id, window in
+            expandedPages.contains(id) && window.isVisible && !window.isMiniaturized
+                && window.occlusionState.contains(.visible)
+        }
+        if needsProcesses != (processTask != nil) {
+            processTask?.cancel(); processTask = nil
+            if needsProcesses {
                 processTask = Task { [weak self] in
                     while !Task.isCancelled {
                         guard let self else { return }
@@ -135,10 +148,8 @@ final class MemoryCoordinator: ObservableObject {
         }
         let interval: Double? = sleeping ? nil : (active ? settings.interval : (settings.showsMenuBar || settings.automaticCleaning ? 10 : nil))
         if samplingInterval != interval {
-            chartGeneration &+= 1
             aggregateTask?.cancel(); samplingInterval = interval
             if let interval {
-                let generation = chartGeneration
                 aggregateTask = Task { [weak self] in
                     while !Task.isCancelled {
                         guard let self else { return }
@@ -147,7 +158,6 @@ final class MemoryCoordinator: ObservableObject {
                         self.statsUnavailable = value == nil
                         if let value {
                             self.snapshot = value
-                            self.chart.append(value, generation: generation, interval: interval)
                         }
                         do { try await Task.sleep(for: .seconds(interval)) } catch { return }
                     }

@@ -48,7 +48,11 @@ nonisolated struct MemoryProcessGroup: Sendable, Identifiable {
     let root: MemoryProcessRecord
     let members: [MemoryProcessRecord]
     let sampledAt: Date
-    var footprint: Int64? { MemorySnapshot.sum(members.map(\.footprint)) }
+    let footprint: Int64?
+    init(root: MemoryProcessRecord, members: [MemoryProcessRecord], sampledAt: Date) {
+        self.root = root; self.members = members; self.sampledAt = sampledAt
+        footprint = MemorySnapshot.sum(members.map(\.footprint))
+    }
     var bundleID: String? { root.app?.bundleID }
     var title: String { root.app?.name ?? root.name }
     var explanation: String {

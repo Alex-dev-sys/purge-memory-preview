@@ -2187,6 +2187,8 @@ final class PurgeStore: ObservableObject {
         let minBytes = filter.size.bytes
         let staleDays = filter.age.days
         var collected: [LargeFile] = []
+        var pendingPublish: Task<Void, Never>?
+        defer { pendingPublish?.cancel() }
 
         // The scanner checks every file against the store before yielding it, off
         // the main actor. What it can't see is an exclusion added after it yielded:
@@ -2204,9 +2206,23 @@ final class PurgeStore: ObservableObject {
             lateExclusions = current
             collected.removeAll { current.covers(path: $0.id) }
         }
-        func publish() {
+        func publish() async {
             syncExclusions()
-            largeFiles = collected.sorted { $0.sizeBytes > $1.sizeBytes }
+            let rows = collected
+            let revision = exclusionRevision
+            let sorted = await Task.detached(priority: .userInitiated) {
+                rows.sorted { $0.sizeBytes > $1.sizeBytes }
+            }.value
+            guard !Task.isCancelled, largeFileScanGeneration == generation else { return }
+            // Exclusions can change while sorting. Never restore a row the user
+            // excluded during that suspension.
+            if revision != exclusionRevision {
+                syncExclusions()
+                let exclusions = ScanExclusions(keys: excludedPaths)
+                largeFiles = sorted.filter { !exclusions.covers(path: $0.id) }
+            } else {
+                largeFiles = sorted
+            }
         }
 
         // Models in known stores resolve from a handful of manifests and
@@ -2224,7 +2240,7 @@ final class PurgeStore: ObservableObject {
             guard !ExcludedPathsStore.isExcluded(model.path) else { continue }
             collected.append(model)
         }
-        publish()
+        await publish()
 
         var summary: LargeFileScanSummary?
         for await event in scanSources.largeFiles(minBytes, staleDays) {
@@ -2234,8 +2250,16 @@ final class PurgeStore: ObservableObject {
                 syncExclusions()
                 if let lateExclusions, lateExclusions.covers(path: file.id) { continue }
                 collected.append(file)
-                if collected.count % 25 == 0 {
-                    publish()
+                // One publication per time window, even when a fast producer
+                // queues thousands of rows. Also flush a short batch if the
+                // scanner then pauses on a slow folder.
+                if pendingPublish == nil {
+                    pendingPublish = Task { @MainActor in
+                        do { try await Task.sleep(for: .milliseconds(150)) }
+                        catch { return }
+                        await publish()
+                        pendingPublish = nil
+                    }
                 }
             case .finished(let finished):
                 summary = finished
@@ -2249,7 +2273,10 @@ final class PurgeStore: ObservableObject {
         // Cancelling ends a `for await` quietly, so Stop during either wait
         // lands here; a stopped scan never counts as complete.
         guard largeFileScanGeneration == generation, !Task.isCancelled else { return }
-        publish()
+        pendingPublish?.cancel()
+        pendingPublish = nil
+        await publish()
+        guard largeFileScanGeneration == generation, !Task.isCancelled else { return }
         largeFileScanSummary = summary
         hasCompletedLargeFileScan = true
         completedLargeFileFilter = filter

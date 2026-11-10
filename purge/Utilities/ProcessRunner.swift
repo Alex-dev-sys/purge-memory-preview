@@ -29,8 +29,9 @@ nonisolated enum ProcessRunner {
         let stderr: Data
         /// `true` when the child overran its budget and was killed; `status` is then meaningless.
         let timedOut: Bool
+        var cancelled: Bool = false
 
-        var succeeded: Bool { !timedOut && status == 0 }
+        var succeeded: Bool { !timedOut && !cancelled && status == 0 }
 
         var stdoutText: String { String(data: stdout, encoding: .utf8) ?? "" }
         var stderrText: String { String(data: stderr, encoding: .utf8) ?? "" }
@@ -44,21 +45,26 @@ nonisolated enum ProcessRunner {
 
     private static let readBufferSize = 64 * 1024
 
-    /// Returns `nil` only when the binary could not be launched at all.
+    /// Returns `nil` when the binary could not be launched or cancellation preceded launch.
     ///
     /// Blocks the calling thread for up to `timeout`. The debug precondition is the guardrail
     /// against reintroducing the launch freeze: this must never run on the main queue.
     ///
-    /// `environment`, when given, replaces the inherited one whole.
+    /// `environment`, when given, replaces the inherited one whole. Read-only
+    /// callers may opt into cancellation with a thread-safe `isCancelled` probe.
     static func run(
         executablePath: String,
         arguments: [String],
         timeout: TimeInterval,
-        environment: [String: String]? = nil
+        environment: [String: String]? = nil,
+        isCancelled: @Sendable () -> Bool = { false }
     ) -> Output? {
         #if DEBUG
         dispatchPrecondition(condition: .notOnQueue(.main))
         #endif
+        // Cancellation is opt-in: interrupting a package-manager mutation can leave
+        // it half applied. Read-only callers such as folder sizing supply a probe.
+        guard !isCancelled() else { return nil }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
@@ -91,13 +97,15 @@ nonisolated enum ProcessRunner {
                 process: process,
                 stdoutFD: stdoutFD,
                 stderrFD: stderrFD,
-                timeout: timeout
+                timeout: timeout,
+                isCancelled: isCancelled
             )
 
             guard drain.reachedEOF else {
                 // Both pipes still open past SIGKILL — a surviving grandchild is holding them.
                 // Abandon rather than hand the caller an unbounded wait.
-                return Output(status: -1, stdout: drain.stdout, stderr: drain.stderr, timedOut: true)
+                return Output(status: -1, stdout: drain.stdout, stderr: drain.stderr,
+                              timedOut: drain.timedOut, cancelled: drain.cancelled)
             }
 
             process.waitUntilExit()
@@ -105,7 +113,8 @@ nonisolated enum ProcessRunner {
                 status: process.terminationStatus,
                 stdout: drain.stdout,
                 stderr: drain.stderr,
-                timedOut: drain.timedOut
+                timedOut: drain.timedOut,
+                cancelled: drain.cancelled
             )
         }
     }
@@ -120,6 +129,7 @@ nonisolated enum ProcessRunner {
         var stdout = Data()
         var stderr = Data()
         var timedOut = false
+        var cancelled = false
         /// `false` when we gave up with a pipe still open, which makes `waitUntilExit` unsafe.
         var reachedEOF = false
     }
@@ -129,7 +139,8 @@ nonisolated enum ProcessRunner {
         process: Process,
         stdoutFD: Int32,
         stderrFD: Int32,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        isCancelled: @Sendable () -> Bool
     ) -> DrainResult {
         var result = DrainResult()
         var openOut = true
@@ -139,9 +150,13 @@ nonisolated enum ProcessRunner {
         var sentKill = false
         var buffer = [UInt8](repeating: 0, count: readBufferSize)
 
-        while openOut || openErr {
-            if Date() >= deadline {
-                result.timedOut = true
+        // A child can close both pipes and keep running. Keep the deadline and
+        // cancellation checks alive until it exits instead of blocking in waitUntilExit.
+        while openOut || openErr || process.isRunning {
+            let cancelling = !sentTerm && isCancelled()
+            if cancelling || Date() >= deadline {
+                if cancelling { result.cancelled = true }
+                else if !sentTerm { result.timedOut = true }
                 if !sentTerm {
                     sentTerm = true
                     process.terminate()

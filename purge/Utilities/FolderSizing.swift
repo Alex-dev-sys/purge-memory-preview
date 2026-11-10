@@ -100,7 +100,7 @@ nonisolated enum FolderSizing {
         // the slot back — otherwise a superseded scan still walks for up to
         // `duChunkTimeout`.
         guard !Task.isCancelled else { return [:] }
-        return runDuChunk(chunk)
+        return runDuChunk(chunk, isCancelled: { Task.isCancelled })
     }
 
     /// Raw `du` for a chunk. Callers that already hold ``duChunkLimiter`` must use this
@@ -108,14 +108,18 @@ nonisolated enum FolderSizing {
     /// and deadlock once the cap is full.
     /// `staysOnVolume` passes `-x`, so `du` does not walk into another file
     /// system mounted inside a folder.
-    private nonisolated static func runDuChunk(_ chunk: [URL], staysOnVolume: Bool = false) -> [String: Int64] {
+    private nonisolated static func runDuChunk(
+        _ chunk: [URL], staysOnVolume: Bool = false,
+        isCancelled: @Sendable () -> Bool = { false }
+    ) -> [String: Int64] {
         // `du` writes one "Permission denied" line per unreadable directory, so stderr can run
         // to megabytes on a broad scan. ProcessRunner drains it concurrently; leaving it
         // undrained would block `du` on a full pipe and hang the read below.
         guard let output = ProcessRunner.run(
             executablePath: "/usr/bin/du",
             arguments: (staysOnVolume ? ["-skx"] : ["-sk"]) + chunk.map { $0.standardizedFileURL.path },
-            timeout: duChunkTimeout
+            timeout: duChunkTimeout,
+            isCancelled: isCancelled
         ) else {
             // Omit paths in this chunk; callers default to 0.
             return [:]
@@ -164,6 +168,7 @@ nonisolated enum FolderSizing {
         var completedChunks = 0
         let lock = NSLock()
         let group = DispatchGroup()
+        let cancellation = CancellationFlag()
 
         for chunk in chunks {
             if Task.isCancelled { break }
@@ -188,7 +193,8 @@ nonisolated enum FolderSizing {
                     duChunkLimiter.signal()
                     group.leave()
                 }
-                let partial = runDuChunk(chunk, staysOnVolume: staysOnVolume)
+                let partial = runDuChunk(chunk, staysOnVolume: staysOnVolume,
+                                         isCancelled: { cancellation.isRaised })
                 lock.lock()
                 for (path, size) in partial {
                     result[path] = size
@@ -201,7 +207,12 @@ nonisolated enum FolderSizing {
             }
         }
 
-        group.wait()
+        // Dispatch workers have no Swift task context. Relay cancellation from
+        // the caller while waiting, including when all chunks were dispatched.
+        if Task.isCancelled { cancellation.raise() }
+        while group.wait(timeout: .now() + limiterPollInterval) != .success {
+            if Task.isCancelled { cancellation.raise() }
+        }
         return result
     }
 

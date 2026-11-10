@@ -1,0 +1,5 @@
+{"iteration":0,"latency_ms":1950.8298340000001,"scenario":"cancel_sleep_2s","status":0}
+{"iteration":1,"latency_ms":1952.9944580000001,"scenario":"cancel_sleep_2s","status":0}
+{"iteration":2,"latency_ms":1949.103333,"scenario":"cancel_sleep_2s","status":0}
+{"iteration":3,"latency_ms":1950.7607910000002,"scenario":"cancel_sleep_2s","status":0}
+{"iteration":4,"latency_ms":1951.925084,"scenario":"cancel_sleep_2s","status":0}

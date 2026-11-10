@@ -1,0 +1,20 @@
+{
+  "date": "2026-11-10",
+  "baseline_revision": "449b3f0fa300a667b271ce6202e9e84273b65a49",
+  "after": "working tree changes to the nine optimized source/test files",
+  "machine": "Apple M1\n8589934592",
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t27.2.1\nBuildVersion:\t\t26B131",
+  "xcode": "Xcode 27.2\nBuild version 27B52",
+  "build": "Release (-O, wholemodule), arm64, ENABLE_TESTABILITY=YES, code coverage disabled",
+  "repetitions": 5,
+  "observer_repetitions": 1,
+  "observer_duration_seconds": 30,
+  "source_instrumentation": "Identical in both disposable copies: permit MemoryCoordinator and MemoryCleanupService observers in the test host, force coordinator app-active true, count cleanup ticks, use hidden window with visible=true. Other TestHost guards remain intact.",
+  "large_files_scope": "Actual PurgeStore.scanLargeFiles with FakeScans; generated metadata only, no filesystem traversal, rendering or duplicate hashing; canMoveToTrash=false.",
+  "cpu": "getrusage(RUSAGE_SELF), user+system; percentage of one CPU core",
+  "memory": "task_info(TASK_VM_INFO), endpoint resident_size and phys_footprint; not peak memory",
+  "cancellation_scope": "Actual ProcessRunner source compiled separately with -O; child sleep 2s, cancellation requested 50ms after ready marker.",
+  "hardened_runtime": "disabled identically for both ad-hoc signed benchmark hosts, as required for Sparkle loading",
+  "observer_scope": "Initialization plus 30 seconds; one trial each, not steady-state CPU measurement",
+  "compared_patch_sha256": "da193e2c90c2e3730fac26d9b2ed92d16c84e6ea6f24b9535609e7dee9b334dc"
+}

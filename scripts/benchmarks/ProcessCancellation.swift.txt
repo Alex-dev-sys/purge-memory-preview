@@ -1,0 +1,33 @@
+import Darwin
+import Foundation
+
+@main struct CancellationBenchmark {
+    static func main() async throws {
+        for iteration in 0..<5 {
+            let marker = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("ready-\(iteration)")
+            let task = Task.detached {
+                #if BENCH_AFTER
+                return ProcessRunner.run(executablePath: "/bin/sh",
+                    arguments: ["-c", "echo ready > \"$1\"; exec /bin/sleep 2", "sh", marker.path],
+                    timeout: 5, isCancelled: { Task.isCancelled })
+                #else
+                return ProcessRunner.run(executablePath: "/bin/sh",
+                    arguments: ["-c", "echo ready > \"$1\"; exec /bin/sleep 2", "sh", marker.path], timeout: 5)
+                #endif
+            }
+            while (try? String(contentsOf: marker, encoding: .utf8)) != "ready\n" {
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            // Ensure the shell has exec'd its child before issuing cancellation.
+            try await Task.sleep(for: .milliseconds(50))
+            let start = ContinuousClock.now
+            task.cancel()
+            let result = await task.value
+            let elapsed = ContinuousClock.now - start
+            let milliseconds = Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15
+            let row: [String: Any] = ["scenario": "cancel_sleep_2s", "iteration": iteration,
+                                      "latency_ms": milliseconds, "status": result?.status ?? -999]
+            print(String(decoding: try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]), as: UTF8.self))
+        }
+    }
+}
